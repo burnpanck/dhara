@@ -4,3 +4,4 @@
 *.o
 tools/gftool
 tools/gentab
+cmake-build-debug/
