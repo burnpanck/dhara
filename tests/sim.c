@@ -20,14 +20,14 @@
 #include "sim.h"
 #include "util.h"
 
-#define LOG2_PAGE_SIZE		9
-#define LOG2_PAGES_PER_BLOCK	3
+#define LOG2_PAGE_SIZE		9u
+#define LOG2_PAGES_PER_BLOCK	3u
 #define LOG2_BLOCK_SIZE		(LOG2_PAGE_SIZE + LOG2_PAGES_PER_BLOCK)
 #define NUM_BLOCKS		113
 
-#define PAGE_SIZE		(1 << LOG2_PAGE_SIZE)
-#define PAGES_PER_BLOCK		(1 << LOG2_PAGES_PER_BLOCK)
-#define BLOCK_SIZE		(1 << LOG2_BLOCK_SIZE)
+#define PAGE_SIZE		(1u << LOG2_PAGE_SIZE)
+#define PAGES_PER_BLOCK		(1u << LOG2_PAGES_PER_BLOCK)
+#define BLOCK_SIZE		(1u << LOG2_BLOCK_SIZE)
 #define MEM_SIZE		(NUM_BLOCKS * BLOCK_SIZE)
 
 const struct dhara_nand sim_nand = {
@@ -36,8 +36,8 @@ const struct dhara_nand sim_nand = {
 	.num_blocks		= NUM_BLOCKS
 };
 
-#define BLOCK_BAD_MARK		0x01
-#define BLOCK_FAILED		0x02
+#define BLOCK_BAD_MARK		0x01u
+#define BLOCK_FAILED		0x02u
 
 /* Call counts */
 struct sim_stats {
@@ -58,7 +58,7 @@ struct sim_stats {
 };
 
 struct block_status {
-	int		flags;
+	unsigned int	flags;
 
 	/* Index of the next unprogrammed page. 0 means a fully erased
 	 * block, and PAGES_PER_BLOCK is a fully programmed block.
@@ -100,6 +100,7 @@ static void timebomb_tick(dhara_block_t blk)
 
 int dhara_nand_is_bad(const struct dhara_nand *n, dhara_block_t bno)
 {
+  (void) n;
 	if (bno >= NUM_BLOCKS) {
 		fprintf(stderr, "sim: NAND_is_bad called on "
 			"invalid block: %d\n", bno);
@@ -113,6 +114,7 @@ int dhara_nand_is_bad(const struct dhara_nand *n, dhara_block_t bno)
 
 void dhara_nand_mark_bad(const struct dhara_nand *n, dhara_block_t bno)
 {
+  (void) n;
 	if (bno >= NUM_BLOCKS) {
 		fprintf(stderr, "sim: NAND_mark_bad called on "
 			"invalid block: %d\n", bno);
@@ -127,6 +129,7 @@ void dhara_nand_mark_bad(const struct dhara_nand *n, dhara_block_t bno)
 int dhara_nand_erase(const struct dhara_nand *n, dhara_block_t bno,
 		     dhara_error_t *err)
 {
+  (void) n;
 	uint8_t *blk = pages + (bno << LOG2_BLOCK_SIZE);
 
 	if (bno >= NUM_BLOCKS) {
@@ -162,8 +165,9 @@ int dhara_nand_erase(const struct dhara_nand *n, dhara_block_t bno,
 int dhara_nand_prog(const struct dhara_nand *n, dhara_page_t p,
 		    const uint8_t *data, dhara_error_t *err)
 {
+  (void) n;
 	const int bno = p >> LOG2_PAGES_PER_BLOCK;
-	const int pno = p & ((1 << LOG2_PAGES_PER_BLOCK) - 1);
+	const int pno = p & ((1u << LOG2_PAGES_PER_BLOCK) - 1);
 	uint8_t *page = pages + (p << LOG2_PAGE_SIZE);
 
 	if ((bno < 0) || (bno >= NUM_BLOCKS)) {
@@ -206,8 +210,9 @@ int dhara_nand_prog(const struct dhara_nand *n, dhara_page_t p,
 
 int dhara_nand_is_free(const struct dhara_nand *n, dhara_page_t p)
 {
+  (void) n;
 	const int bno = p >> LOG2_PAGES_PER_BLOCK;
-	const int pno = p & ((1 << LOG2_PAGES_PER_BLOCK) - 1);
+	const int pno = p & ((1u << LOG2_PAGES_PER_BLOCK) - 1);
 
 	if ((bno < 0) || (bno >= NUM_BLOCKS)) {
 		fprintf(stderr, "sim: NAND_is_free called on "
@@ -224,7 +229,10 @@ int dhara_nand_read(const struct dhara_nand *n, dhara_page_t p,
 		    size_t offset, size_t length,
 		    uint8_t *data, dhara_error_t *err)
 {
-	const int bno = p >> LOG2_PAGES_PER_BLOCK;
+  (void) n;
+  (void) err;
+
+  const int bno = p >> LOG2_PAGES_PER_BLOCK;
 	uint8_t *page = pages + (p << LOG2_PAGE_SIZE);
 
 	if ((bno < 0) || (bno >= NUM_BLOCKS)) {
