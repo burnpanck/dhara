@@ -18,7 +18,7 @@
 #include "bytes.h"
 #include "map.h"
 
-#define DHARA_RADIX_DEPTH	(sizeof(dhara_sector_t) << 3)
+#define DHARA_RADIX_DEPTH	(sizeof(dhara_sector_t) << 3u)
 
 static inline dhara_sector_t d_bit(int depth)
 {
