@@ -14,7 +14,7 @@
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 CC = $(CROSS_COMPILE)gcc
-DHARA_CFLAGS = $(CFLAGS) -O1 -Wall -ggdb -I.
+DHARA_CFLAGS = $(CFLAGS) -std=c99 -O1 -Wall -Wextra -ggdb -I.
 TESTS = \
     tests/error.test \
     tests/nand.test \

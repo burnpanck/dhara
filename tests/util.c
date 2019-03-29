@@ -18,24 +18,25 @@
 #include <stdio.h>
 #include <assert.h>
 #include "dhara/bytes.h"
+#include "dhara/error.h"
 #include "util.h"
 
 void seq_gen(unsigned int seed, uint8_t *buf, size_t length)
 {
 	size_t i;
 
-	srandom(seed);
+	srand(seed);
 	for (i = 0; i < length; i++)
-		buf[i] = random();
+		buf[i] = rand();
 }
 
 void seq_assert(unsigned int seed, const uint8_t *buf, size_t length)
 {
 	size_t i;
 
-	srandom(seed);
+	srand(seed);
 	for (i = 0; i < length; i++) {
-		const uint8_t expect = random();
+		const uint8_t expect = rand();
 
 		if (buf[i] != expect) {
 			fprintf(stderr, "seq_assert: mismatch at %ld in "

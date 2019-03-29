@@ -25,7 +25,7 @@
 
 static void flip_one_bit(uint8_t *b, int size)
 {
-	const int which = random() % (size * 8);
+	const int which = rand() % (size * 8);
 	const int byte = which >> 3;
 	const uint8_t bit = 1 << (which & 7);
 
@@ -71,7 +71,7 @@ static void test_random_block(const struct bch_def *def)
 	int i;
 
 	for (i = 0; i < BCH_CHUNK_SIZE; i++)
-		block[i] = random();
+		block[i] = rand();
 
 	bch_generate(def, block, BCH_CHUNK_SIZE, block + BCH_CHUNK_SIZE);
 	test_properties(def, block);
@@ -93,7 +93,7 @@ static void test_code(const struct bch_def *def)
 
 int main(void)
 {
-	srandom(0);
+	srand(0);
 	test_code(&bch_1bit);
 	test_code(&bch_2bit);
 	test_code(&bch_3bit);

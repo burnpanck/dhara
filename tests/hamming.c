@@ -25,7 +25,7 @@
 
 static void flip_one_bit(uint8_t *b, int size)
 {
-	const int which = random() % (size * 8);
+	const int which = rand() % (size * 8);
 	const int byte = which >> 3;
 	const uint8_t bit = 1 << (which & 7);
 
@@ -69,7 +69,7 @@ static void test_random_block(void)
 	int i;
 
 	for (i = 0; i < HAMMING_CHUNK_SIZE; i++)
-		block[i] = random();
+		block[i] = rand();
 
 	hamming_generate(block, HAMMING_CHUNK_SIZE,
 			 block + HAMMING_CHUNK_SIZE);
@@ -90,7 +90,7 @@ static void test_code(void)
 
 int main(void)
 {
-	srandom(0);
+	srand(0);
 	test_code();
 
 	return 0;

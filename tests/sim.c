@@ -305,7 +305,7 @@ void sim_inject_bad(int count)
 	int i;
 
 	for (i = 0; i < count; i++) {
-		const int bno = random() % NUM_BLOCKS;
+		const int bno = rand() % NUM_BLOCKS;
 
 		blocks[bno].flags |= BLOCK_BAD_MARK | BLOCK_FAILED;
 	}
@@ -316,7 +316,7 @@ void sim_inject_failed(int count)
 	int i;
 
 	for (i = 0; i < count; i++)
-		sim_set_failed(random() % NUM_BLOCKS);
+		sim_set_failed(rand() % NUM_BLOCKS);
 }
 
 void sim_inject_timebombs(int count, int max_ttl)
@@ -324,8 +324,8 @@ void sim_inject_timebombs(int count, int max_ttl)
 	int i;
 
 	for (i = 0; i < count; i++)
-		sim_set_timebomb(random() % NUM_BLOCKS,
-				 random() % max_ttl + 1);
+		sim_set_timebomb(rand() % NUM_BLOCKS,
+				 rand() % max_ttl + 1);
 }
 
 void sim_freeze(void)

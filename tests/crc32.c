@@ -23,7 +23,7 @@
 
 static void flip_one_bit(uint8_t *b, int size)
 {
-	const int which = random() % (size * 8);
+	const int which = rand() % (size * 8);
 	const int byte = which >> 3;
 	const uint8_t bit = 1 << (which & 7);
 
@@ -52,7 +52,7 @@ static void test_random_block(void)
 	int i;
 
 	for (i = 0; i < BLOCK_SIZE; i++)
-		block[i] = random();
+		block[i] = rand();
 
 	crc = crc32_nand(block, BLOCK_SIZE, CRC32_INIT);
 
@@ -68,7 +68,7 @@ int main(void)
 	memset(block, 0xff, sizeof(block));
 	assert(crc32_nand(block, BLOCK_SIZE, CRC32_INIT) == 0xffffffff);
 
-	srandom(0);
+	srand(0);
 	for (i = 0; i < 10; i++)
 		test_random_block();
 

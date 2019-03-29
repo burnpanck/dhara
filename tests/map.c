@@ -31,12 +31,12 @@ static void shuffle(int seed)
 {
 	int i;
 
-	srandom(seed);
+	srand(seed);
 	for (i = 0; i < NUM_SECTORS; i++)
 		sector_list[i] = i;
 
 	for (i = NUM_SECTORS - 1; i > 0; i--) {
-		const int j = random() % i;
+		const int j = rand() % i;
 		const int tmp = sector_list[i];
 
 		sector_list[i] = sector_list[j];
