@@ -5,3 +5,5 @@
 tools/gftool
 tools/gentab
 cmake-build-debug/
+/.idea/workspace.xml
+/cmake-build-debug/
