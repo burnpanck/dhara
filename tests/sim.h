@@ -47,4 +47,6 @@ void sim_inject_failed(int count);
 /* Create a timebomb on the given block */
 void sim_inject_timebombs(int count, int max_ttl);
 
+uint8_t const * physical_page(dhara_page_t which);
+
 #endif

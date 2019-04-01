@@ -5,7 +5,7 @@ project(dhara-nand-ftl C)
 set(CMAKE_C_STANDARD 99)
 
 include_directories(${CMAKE_CURRENT_LIST_DIR})
-add_compile_options(-O1 -std=c99 -Wall -Wextra -ggdb)
+add_compile_options(-O0 -std=c99 -Wall -Wextra -ggdb)
 
 add_library(dhara
         dhara/error.c

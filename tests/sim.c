@@ -23,7 +23,7 @@
 #define LOG2_PAGE_SIZE		9u
 #define LOG2_PAGES_PER_BLOCK	3u
 #define LOG2_BLOCK_SIZE		(LOG2_PAGE_SIZE + LOG2_PAGES_PER_BLOCK)
-#define NUM_BLOCKS		113
+#define NUM_BLOCKS    4096
 
 #define PAGE_SIZE		(1u << LOG2_PAGE_SIZE)
 #define PAGES_PER_BLOCK		(1u << LOG2_PAGES_PER_BLOCK)
@@ -370,4 +370,12 @@ void sim_dump(void)
 
 		i += j;
 	}
+}
+
+uint8_t const *physical_page(dhara_page_t which)
+{
+	if (which > NUM_BLOCKS * PAGES_PER_BLOCK) {
+		return NULL;
+	}
+	return &pages[which];
 }

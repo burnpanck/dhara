@@ -83,32 +83,47 @@ static const uint8_t raw_data4[] =
 				0x00, 0x0A, 0x00, 0x46, 0xFF
 		};
 
+static uint8_t const *data_chunks[] = {raw_data1, raw_data2, raw_data3,
+																			 raw_data4};
+static size_t const data_sizes[] = {sizeof raw_data1, sizeof raw_data2,
+																		sizeof raw_data3, sizeof raw_data4};
+
 void single_sector_test(dhara_sector_t sector)
 {
+	printf("single sector test for sector#%d\n", sector);
+	sim_reset();
+	sim_inject_bad(30);
+	sim_inject_timebombs(60, 10);
+	sim_dump();
+
 	const size_t page_size = 1 << sim_nand.log2_page_size;
 	uint8_t page_buf[page_size];
 	struct dhara_map map;
-	sim_reset();
-	sim_inject_bad(10);
-	sim_inject_timebombs(30, 20);
+
+	uint8_t src_buf[page_size];
+	uint8_t dst_buf[page_size];
+
+
+	uint8_t const *pdata = data_chunks[0];
+	size_t size = data_sizes[0];
+	for (size_t i = 0; i < page_size; ++i) {
+		src_buf[i] = 0xff;
+		dst_buf[i] = 0xff;
+	}
+	memcpy(src_buf, pdata, size);
+
 	dhara_map_init(&map, &sim_nand, page_buf, GC_RATIO);
 	dhara_map_resume(&map, NULL);
 
-	uint8_t src_buf[page_size];
-
-	for (size_t i = 0; i < page_size; ++i) {
-		src_buf[i] = 0xff;
-	}
-	memcpy(src_buf, raw_data1, sizeof raw_data1);
 
 	dhara_error_t err = DHARA_E_NONE;
-	if (dhara_map_write(&map, sector, raw_data1, &err) < 0) {
+	if (dhara_map_write(&map, sector, src_buf, &err) < 0) {
 		dabort("Error writing single sector", err);
 	}
+	dhara_map_sync(&map, NULL);
 
-	for (volatile int i = 0; i < 10000; ++i) {
-		dhara_map_sync(&map, NULL);
-
+	for (int i = 0; i < 300; ++i) {
+		printf("Writing sector #%d iteration #%d, data chunk #%d\n", sector, i, i & 0x03);
 		dhara_map_init(&map, &sim_nand, page_buf, GC_RATIO);
 		dhara_map_resume(&map, NULL);
 
@@ -118,22 +133,30 @@ void single_sector_test(dhara_sector_t sector)
 			dabort("Single sector not found", err);
 		}
 
-		if (dhara_map_write(&map, sector, raw_data1, &err) < 0) {
-			dabort("Error re-writing single sector", err);
-		}
+		uint8_t (*p)[512] = physical_page(loc);
 
-		dhara_map_sync(&map, NULL);
-
-		for (size_t i = 0; i < page_size; ++i) {
-			src_buf[i] = 0xff;
+		for (size_t j = 0; j < page_size; ++j) {
+			dst_buf[j] = 0xff;
 		}
-		if (dhara_map_read(&map, sector, src_buf, &err) < 0) {
+		if (dhara_map_read(&map, sector, dst_buf, &err) < 0) {
 			dabort("Error reading single sector", err);
 		}
-
-		if (memcmp(src_buf, raw_data1, sizeof raw_data1) != 0) {
+		if (memcmp(src_buf, dst_buf, page_size) != 0) {
 			dabort("Single sector does not match", err);
 		}
+
+		unsigned data_idx = (i + 1) & 0x03;
+		pdata = data_chunks[data_idx];
+		size = data_sizes[data_idx];
+		for (size_t i = 0; i < page_size; ++i) {
+			src_buf[i] = 0xff;
+			dst_buf[i] = 0xff;
+		}
+		memcpy(src_buf, pdata, size);
+		if (dhara_map_write(&map, sector, src_buf, &err) < 0) {
+			dabort("Error re-writing single sector", err);
+		}
+		dhara_map_sync(&map, NULL);
 	}
 
 	sim_dump();
