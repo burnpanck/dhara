@@ -2,10 +2,10 @@ cmake_minimum_required(VERSION 3.13)
 
 project(dhara-nand-ftl C)
 
-set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD 11)
 
 include_directories(${CMAKE_CURRENT_LIST_DIR})
-add_compile_options(-O0 -std=c99 -Wall -Wextra -ggdb)
+add_compile_options(-O1 -std=c11 -Wall -Wextra -ggdb)
 
 add_library(dhara
         dhara/error.c
@@ -26,6 +26,14 @@ add_library(testutils
         tests/jtutil.c
         )
 target_link_libraries(testutils dhara ecc)
+
+
+add_library(testutils2
+        tests/sim2.c
+        tests/util.c
+        tests/jtutil.c
+        )
+target_link_libraries(testutils2 dhara ecc)
 
 
 add_executable(bch.test
@@ -92,3 +100,8 @@ add_executable(gftoot
         tools/gftool.c
         )
 target_link_libraries(gftoot dhara ecc)
+
+add_executable(map2.test
+        tests/map2.c
+        )
+target_link_libraries(map2.test dhara ecc testutils2)
