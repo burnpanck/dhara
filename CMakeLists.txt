@@ -1,11 +1,44 @@
 cmake_minimum_required(VERSION 3.13)
 
-project(dhara-nand-ftl C)
+project(dhara-nand-ftl C CXX)
 
 set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_VERBOSE_MAKEFILE ON)
 
-include_directories(${CMAKE_CURRENT_LIST_DIR})
-add_compile_options(-O1 -std=c11 -Wall -Wextra -ggdb)
+add_library(dhara-cpp
+        src/error.cpp
+        src/journal.cpp
+#        src/map.cpp
+        )
+target_include_directories(dhara-cpp PUBLIC include/)
+
+add_library(testlib
+        tests-c++/sim.cpp
+        tests-c++/util.cpp
+        tests-c++/jtutil.cpp
+)
+target_link_libraries(testlib PUBLIC dhara-cpp)
+
+set(tests
+        epoch_roll
+        error
+        jfill
+        journal
+        map
+        nand
+        recovery
+    )
+
+foreach(test ${tests})
+    add_executable(${test}-c++.test
+            tests-c++/${test}.cpp
+            )
+    target_link_libraries(${test}-c++.test PRIVATE dhara-cpp testlib)
+endforeach()
+
+# include_directories(${CMAKE_CURRENT_LIST_DIR})
+# add_compile_options(-O1 -std=c11 -Wall -Wextra -ggdb)
 
 add_library(dhara
         dhara/error.c
@@ -28,68 +61,37 @@ add_library(testutils
 target_link_libraries(testutils dhara ecc)
 
 
+if(FALSE)
 add_library(testutils2
         tests/sim2.c
         tests/util.c
         tests/jtutil.c
         )
 target_link_libraries(testutils2 dhara ecc)
+endif()
 
 
-add_executable(bch.test
-        tests/bch.c
+set(tests
+    bch
+    crc32
+    epoch_roll
+    error
+    hamming
+    jfill
+    journal
+    map
+#    map2
+    nand
+    recovery
+    read_what_is_written
+)
+
+foreach(test ${tests})
+add_executable(${test}.test
+        tests/${test}.c
         )
-target_link_libraries(bch.test dhara ecc testutils)
-
-add_executable(crc32.test
-        tests/crc32.c
-        )
-target_link_libraries(crc32.test dhara ecc testutils)
-
-add_executable(epoch_roll.test
-        tests/epoch_roll.c
-        )
-target_link_libraries(epoch_roll.test dhara ecc testutils)
-
-add_executable(error.test
-        tests/error.c
-        )
-target_link_libraries(error.test dhara ecc testutils)
-
-add_executable(hamming.test
-        tests/hamming.c
-        )
-target_link_libraries(hamming.test dhara ecc testutils)
-
-add_executable(jfill.test
-        tests/jfill.c
-        )
-target_link_libraries(jfill.test dhara ecc testutils)
-
-add_executable(journal.test
-        tests/journal.c
-        )
-target_link_libraries(journal.test dhara ecc testutils)
-
-add_executable(map.test
-        tests/map.c
-        )
-target_link_libraries(map.test dhara ecc testutils)
-
-add_executable(nand.test
-        tests/nand.c
-        )
-target_link_libraries(nand.test dhara ecc testutils)
-
-add_executable(recovery.test
-        tests/recovery.c
-        )
-target_link_libraries(recovery.test dhara ecc testutils)
-
-add_executable(read_what_is_written.test
-        tests/read_what_is_written.c
-        )
-target_link_libraries(read_what_is_written.test dhara ecc testutils)
+target_link_libraries(${test}.test dhara ecc testutils)
+endforeach()
 
 add_executable(gentab
         tools/gentab.c
@@ -100,8 +102,3 @@ add_executable(gftoot
         tools/gftool.c
         )
 target_link_libraries(gftoot dhara ecc)
-
-add_executable(map2.test
-        tests/map2.c
-        )
-target_link_libraries(map2.test dhara ecc testutils2)
