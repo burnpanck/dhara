@@ -169,10 +169,12 @@ Journal::Journal(Nand &n, page_buf_t page_buf) noexcept
  */
 int Journal::find_checkblock(block_t blk, block_t *where, error_t *err) const noexcept {
   const std::size_t page_size = this->nand.page_size();
+  Outcome<void> res(error_t::none);
+
   for (int i = 0; (blk < this->nand.num_blocks()) && (i < DHARA_MAX_RETRIES); i++) {
     const page_t p = (blk << this->nand.log2_ppb()) | ((1 << this->log2_ppc) - 1);
 
-    if (!(this->nand.is_bad(blk) || this->nand.read(p, 0, page_buf, err)) &&
+    if (!(this->nand.is_bad(blk) || res.pass_and_maybe_store(this->nand.read(p, 0, page_buf)).has_error()) &&
         hdr_has_magic(this->page_buf)) {
       *where = blk;
       return 0;
@@ -181,7 +183,8 @@ int Journal::find_checkblock(block_t blk, block_t *where, error_t *err) const no
     blk++;
   }
 
-  set_error(err, error_t::too_bad);
+  res.pass_and_maybe_store( error_t::too_bad);
+  *err = res.error();
   return -1;
 }
 
@@ -270,11 +273,12 @@ int Journal::find_root(page_t start, error_t *err) noexcept {
   const std::uint8_t log2_ppb = this->nand.log2_ppb();
   const block_t blk = start >> log2_ppb;
   int i = (start & ((1 << log2_ppb) - 1)) >> this->log2_ppc;
+  Outcome<void> res(error_t::none);
 
   while (i >= 0) {
     const page_t p = (blk << log2_ppb) + ((i + 1) << this->log2_ppc) - 1;
 
-    if (!this->nand.read(p, 0, page_buf, err) && (hdr_has_magic(this->page_buf)) &&
+    if (!res.pass_and_maybe_store(this->nand.read(p, 0, page_buf)).has_error() && (hdr_has_magic(this->page_buf)) &&
         (hdr_get_epoch(this->page_buf) == this->epoch)) {
       this->root_ = p - 1;
       return 0;
@@ -283,7 +287,8 @@ int Journal::find_root(page_t start, error_t *err) noexcept {
     i--;
   }
 
-  set_error(err, error_t::too_bad);
+  res.pass_and_maybe_store( error_t::too_bad);
+  *err = res.error();
   return -1;
 }
 
@@ -410,11 +415,16 @@ int Journal::read_meta(page_t p, meta_buf_t buf, error_t *err) noexcept {
   /* Special case: incomplete metadata dumped at start of
    * recovery.
    */
-  if ((this->recover_meta != DHARA_PAGE_NONE) && align_eq(p, this->recover_root, this->log2_ppc))
-    return this->nand.read(this->recover_meta, offset, buf, err);
+  if ((this->recover_meta != DHARA_PAGE_NONE) && align_eq(p, this->recover_root, this->log2_ppc)) {
+    auto res = this->nand.read(this->recover_meta, offset, buf);
+    if(res.has_error()) *err = res.error();
+    return res.has_error() ? -1 : 0;
+  }
 
   /* General case: fetch from metadata page for checkpoint group */
-  return this->nand.read(p | ppc_mask, offset, buf, err);
+  auto res = this->nand.read(p | ppc_mask, offset, buf);
+  if(res.has_error()) *err = res.error();
+  return res.has_error() ? -1 : 0;
 }
 
 page_t Journal::peek() noexcept {
@@ -497,7 +507,11 @@ int Journal::prepare_head(error_t *err) noexcept {
   for (i = 0; i < DHARA_MAX_RETRIES; i++) {
     const block_t blk = this->head >> this->nand.log2_ppb();
 
-    if (!this->nand.is_bad(blk)) return this->nand.erase(blk, err);
+    if (!this->nand.is_bad(blk)) {
+      auto res = this->nand.erase(blk);
+      if(res.has_error()) *err = res.error();
+      return res.has_error() ? -1 : 0;
+    }
 
     this->bb_current++;
     if (skip_block(err) < 0) return -1;
@@ -539,7 +553,7 @@ int Journal::dump_meta(error_t *err) noexcept {
     error_t my_err;
 
     /* Try to dump metadata on this page */
-    if (!(prepare_head(&my_err) || this->nand.prog(this->head, page_buf, &my_err))) {
+    if (!(prepare_head(&my_err) || this->nand.prog(this->head, page_buf).handle_legacy_err(my_err))) {
       this->recover_meta = this->head;
       this->head = next_upage(this->head);
       if (!this->head) roll_stats();
@@ -645,7 +659,7 @@ int Journal::push_meta(const std::byte *meta, error_t *err) noexcept {
   hdr_set_bb_current(this->page_buf, this->bb_current);
   hdr_set_bb_last(this->page_buf, this->bb_last);
 
-  if (this->nand.prog(this->head + 1, this->page_buf, &my_err) < 0)
+  if (this->nand.prog(this->head + 1, this->page_buf).handle_legacy_err(my_err) < 0)
     return recover_from(my_err, err);
 
   this->flags &= ~DHARA_JOURNAL_F_DIRTY;
@@ -668,7 +682,7 @@ int Journal::enqueue(const std::byte *data, const std::byte *meta, error_t *err)
 
   for (i = 0; i < DHARA_MAX_RETRIES; i++) {
     if (!(prepare_head(&my_err) ||
-          (data && this->nand.prog(this->head, {data, this->nand.page_size()}, &my_err))))
+          (data && this->nand.prog(this->head, {data, this->nand.page_size()}).handle_legacy_err(my_err))))
       return push_meta(meta, err);
 
     if (recover_from(my_err, err) < 0) return -1;
@@ -683,7 +697,7 @@ int Journal::copy(page_t p, const std::byte *meta, error_t *err) noexcept {
   int i;
 
   for (i = 0; i < DHARA_MAX_RETRIES; i++) {
-    if (!(prepare_head(&my_err) || this->nand.copy(p, this->head, &my_err)))
+    if (!(prepare_head(&my_err) || this->nand.copy(p, this->head).handle_legacy_err(my_err)))
       return push_meta(meta, err);
 
     if (recover_from(my_err, err) < 0) return -1;

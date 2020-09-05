@@ -82,7 +82,7 @@ class SimNand : public Nand {
    * The status reported by the chip should be checked. If an erase
    * operation fails, return -1 and set err to E_BAD_BLOCK.
    */
-  virtual int erase(block_t b, error_t *err) noexcept override;
+  virtual Outcome<void> erase(block_t b) noexcept override;
 
   /* Program the given page. The data pointer is a pointer to an entire
    * page ((1 << log2_page_size) bytes). The operation status should be
@@ -92,23 +92,23 @@ class SimNand : public Nand {
    * Pages will be programmed sequentially within a block, and will not be
    * reprogrammed.
    */
-  virtual int prog(page_t p, std::span<const std::byte> data, error_t *err) noexcept override;
+  virtual Outcome<void> prog(page_t p, std::span<const std::byte> data) noexcept override;
 
   /* Check that the given page is erased */
-  virtual int is_free(page_t p) const noexcept override;
+  virtual bool is_free(page_t p) const noexcept override;
 
   /* Read a portion of a page. ECC must be handled by the NAND
    * implementation. Returns 0 on sucess or -1 if an error occurs. If an
    * uncorrectable ECC error occurs, return -1 and set err to E_ECC.
    */
-  virtual int read(page_t p, size_t offset, std::span<std::byte> data,
-                   error_t *err) const noexcept override;
+  virtual Outcome<void> read(page_t p, size_t offset,
+                             std::span<std::byte> data) const noexcept override;
 
   /* Read a page from one location and reprogram it in another location.
    * This might be done using the chip's internal buffers, but it must use
    * ECC.
    */
-  virtual int copy(page_t src, page_t dst, error_t *err) noexcept override;
+  virtual Outcome<void> copy(page_t src, page_t dst) noexcept override;
 
  public:
   /* Reset to start-up defaults */

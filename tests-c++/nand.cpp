@@ -29,28 +29,28 @@ int main() {
   sim_nand.reset();
   sim_nand.inject_bad(5);
 
+  Outcome<void> res(error_t::none);
+
   for (int i = 0; i < (1 << sim_nand.log2_ppb()); i++) {
     for (int j = 0; j < sim_nand.num_blocks(); j++) {
       std::array<std::byte, sim_nand.page_size_> block;
-      error_t err;
       page_t p = (j << sim_nand.log2_ppb()) | i;
 
       if (sim_nand.is_bad(j)) continue;
 
-      if (!i && (sim_nand.erase(j, &err) < 0)) dabort("erase", err);
+      if (!i && (res = sim_nand.erase(j)).has_error()) dabort("erase", res.error());
 
       seq_gen(p, block);
-      if (sim_nand.prog(p, block, &err) < 0) dabort("prog", err);
+      if ((res = sim_nand.prog(p, block)).has_error()) dabort("prog", res.error());
     }
   }
 
   for (int i = 0; i < (sim_nand.num_blocks() << sim_nand.log2_ppb()); i++) {
     std::array<std::byte, sim_nand.page_size_> block;
-    error_t err;
 
     if (sim_nand.is_bad(i >> sim_nand.log2_ppb())) continue;
 
-    if (sim_nand.read(i, 0, block, &err) < 0) dabort("read", err);
+    if ((res = sim_nand.read(i, 0, block)).has_error()) dabort("read", res.error());
 
     seq_assert(i, block);
   }

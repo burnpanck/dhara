@@ -87,7 +87,7 @@ void SimNand::mark_bad(block_t bno) noexcept {
  * The status reported by the chip should be checked. If an erase
  * operation fails, return -1 and set err to E_BAD_BLOCK.
  */
-int SimNand::erase(block_t bno, error_t *err) noexcept {
+Outcome<void> SimNand::erase(block_t bno) noexcept {
   auto blocks = this->blocks();
 
   if (bno >= blocks.size()) {
@@ -116,12 +116,11 @@ int SimNand::erase(block_t bno, error_t *err) noexcept {
   if (blocks[bno].flags.failed) {
     if (!stats.frozen) stats.erase_fail++;
     seq_gen(bno * 57 + 29, blk);
-    set_error(err, error_t::bad_block);
-    return -1;
+    return error_t::bad_block;
   }
 
   memset(blk.data(), 0xff, blk.size_bytes());
-  return 0;
+  return error_t::none;
 }
 
 /* Program the given page. The data pointer is a pointer to an entire
@@ -132,7 +131,7 @@ int SimNand::erase(block_t bno, error_t *err) noexcept {
  * Pages will be programmed sequentially within a block, and will not be
  * reprogrammed.
  */
-int SimNand::prog(page_t p, std::span<const std::byte> data, error_t *err) noexcept {
+Outcome<void> SimNand::prog(page_t p, std::span<const std::byte> data) noexcept {
   const int bno = p >> log2_ppb();
   const int pno = p & ((1u << log2_ppb()) - 1u);
 
@@ -173,16 +172,15 @@ int SimNand::prog(page_t p, std::span<const std::byte> data, error_t *err) noexc
   if (blocks[bno].flags.failed) {
     if (!stats.frozen) stats.prog_fail++;
     seq_gen(p * 57 + 29, page);
-    set_error(err, error_t::bad_block);
-    return -1;
+    return error_t::bad_block;
   }
 
   memcpy(page.data(), data.data(), std::min(page.size_bytes(), data.size_bytes()));
-  return 0;
+  return error_t::none;
 }
 
 /* Check that the given page is erased */
-int SimNand::is_free(page_t p) const noexcept {
+bool SimNand::is_free(page_t p) const noexcept {
   const int bno = p >> log2_ppb();
   const int pno = p & ((1u << log2_ppb()) - 1u);
 
@@ -204,9 +202,7 @@ int SimNand::is_free(page_t p) const noexcept {
  * implementation. Returns 0 on sucess or -1 if an error occurs. If an
  * uncorrectable ECC error occurs, return -1 and set err to E_ECC.
  */
-int SimNand::read(page_t p, size_t offset, std::span<std::byte> data, error_t *err) const noexcept {
-  (void)err;
-
+Outcome<void> SimNand::read(page_t p, size_t offset, std::span<std::byte> data) const noexcept {
   const int bno = p >> log2_ppb();
 
   if ((bno < 0) || (bno >= num_blocks())) {
@@ -233,19 +229,20 @@ int SimNand::read(page_t p, size_t offset, std::span<std::byte> data, error_t *e
   }
 
   memcpy(data.data(), page.data(), data.size());
-  return 0;
+  return error_t::none;
 }
 
 /* Read a page from one location and reprogram it in another location.
  * This might be done using the chip's internal buffers, but it must use
  * ECC.
  */
-int SimNand::copy(page_t src, page_t dst, error_t *err) noexcept {
+Outcome<void> SimNand::copy(page_t src, page_t dst) noexcept {
   auto buf = page_buf();
 
-  if ((read(src, 0, buf, err) < 0) || (prog(dst, buf, err) < 0)) return -1;
+  DHARA_TRY(read(src, 0, buf));
+  DHARA_TRY(prog(dst, buf));
 
-  return 0;
+  return error_t::none;
 }
 
 static char rep_status(const struct block_status *b) {

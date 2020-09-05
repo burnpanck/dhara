@@ -191,7 +191,8 @@ void TestJournal::dequeue_sequence(int next, int count) {
       next++;
       count--;
 
-      if (nand.read(tail, 0, {r, page_size}, &err) < 0) dabort("nand_read", err);
+      Outcome<void> res(error_t::none);
+      if ((res = nand.read(tail, 0, {r, page_size})).has_error()) dabort("nand_read", res.error());
 
       seq_assert(id, {r, page_size});
     }
