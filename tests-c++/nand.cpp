@@ -29,8 +29,6 @@ int main() {
   sim_nand.reset();
   sim_nand.inject_bad(5);
 
-  Outcome<void> res(error_t::none);
-
   for (int i = 0; i < (1 << sim_nand.log2_ppb()); i++) {
     for (int j = 0; j < sim_nand.num_blocks(); j++) {
       std::array<std::byte, sim_nand.page_size_> block;
@@ -38,10 +36,12 @@ int main() {
 
       if (sim_nand.is_bad(j)) continue;
 
-      if (!i && (res = sim_nand.erase(j)).has_error()) dabort("erase", res.error());
+      if (!i) {
+        DHARA_TRY_ABORT(sim_nand.erase(j));
+      }
 
       seq_gen(p, block);
-      if ((res = sim_nand.prog(p, block)).has_error()) dabort("prog", res.error());
+      DHARA_TRY_ABORT(sim_nand.prog(p, block));
     }
   }
 
@@ -50,7 +50,7 @@ int main() {
 
     if (sim_nand.is_bad(i >> sim_nand.log2_ppb())) continue;
 
-    if ((res = sim_nand.read(i, 0, block)).has_error()) dabort("read", res.error());
+    DHARA_TRY_ABORT(sim_nand.read(i, 0, block));
 
     seq_assert(i, block);
   }

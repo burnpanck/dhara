@@ -66,7 +66,7 @@ struct block_status {
 /* Simulated NAND layer. This layer reads and writes to an in-memory
  * buffer.
  */
-class SimNand : public Nand {
+class SimNand : public NandBase {
  public:
   /* Is the given block bad? */
   virtual bool is_bad(block_t b) const noexcept override;
@@ -169,7 +169,7 @@ class SimNand : public Nand {
   mutable sim_stats stats;
 };
 
-template <std::uint8_t log2_page_size__ = 4u, std::uint8_t log2_ppb__ = 3u,
+template <std::uint8_t log2_page_size__ = 9u, std::uint8_t log2_ppb__ = 3u,
           std::size_t num_blocks__ = 113u>
 class StaticSimNand final : public SimNand {
  public:

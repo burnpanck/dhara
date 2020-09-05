@@ -14,8 +14,9 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include "sim.hpp"
+#include <dhara/bytes.hpp>
 
+#include "sim.hpp"
 #include "util.hpp"
 
 #include <cstdio>
@@ -228,7 +229,7 @@ Outcome<void> SimNand::read(page_t p, size_t offset, std::span<std::byte> data) 
     stats.read_bytes += data.size();
   }
 
-  memcpy(data.data(), page.data(), data.size());
+  memcpy(data.data(), page.data(), data.size_bytes());
   return error_t::none;
 }
 

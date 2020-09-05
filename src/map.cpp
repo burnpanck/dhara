@@ -49,7 +49,7 @@ void meta_set_alt(std::byte *meta, int level, page_t alt) {
  * Public interface
  */
 
-void dhara_map_init(struct dhara_map *m, Nand *n, std::byte *page_buf, uint8_t gc_ratio) {
+void dhara_map_init(struct dhara_map *m, NandBase *n, std::byte *page_buf, uint8_t gc_ratio) {
   if (!gc_ratio) gc_ratio = 1;
 
   dhara_journal_init(&m->journal, n, page_buf);
@@ -144,7 +144,7 @@ int dhara_map_find(struct dhara_map *m, dhara_sector_t target, page_t *loc, erro
 }
 
 int dhara_map_read(struct dhara_map *m, dhara_sector_t s, std::byte *data, error_t *err) {
-  const Nand *n = m->journal.nand;
+  const NandBase *n = m->journal.nand;
   error_t my_err;
   page_t p;
   const std::size_t page_size = n->page_size();

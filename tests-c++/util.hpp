@@ -28,13 +28,20 @@ namespace dhara_tests {
 using namespace dhara;
 
 /* Abort, displaying an error */
-void dabort(const char *message, error_t err);
+[[noreturn]] void dabort(const char *message, error_t err);
 
 /* Generate a pseudo-random sequence of data */
 void seq_gen(unsigned int seed, std::span<std::byte> buf);
 
 /* Check a pseudo-random sequence */
 void seq_assert(unsigned int seed, std::span<const std::byte> buf);
+
+#define DHARA_TRY_ABORT(x)                                          \
+  {                                                                 \
+    auto __dhara_try_abort_res = (x);                               \
+    if (__builtin_expect(__dhara_try_abort_res.has_error(), false)) \
+      dabort(#x, __dhara_try_abort_res.error());                    \
+  }
 
 }  // namespace dhara_tests
 

@@ -42,7 +42,7 @@ typedef uint32_t block_t;
  * The functions declared below are not implemented -- they must be
  * provided and satisfy the documented conditions.
  */
-class Nand {
+class NandBase {
  public:
   /* Is the given block bad? */
   virtual bool is_bad(block_t b) const noexcept = 0;
@@ -105,7 +105,49 @@ class Nand {
   [[nodiscard]] virtual constexpr std::size_t pages_per_block() const { return 1u << log2_ppb(); };
   [[nodiscard]] virtual constexpr std::size_t block_size() const { return 1u << log2_block_size(); }
   [[nodiscard]] virtual constexpr std::size_t mem_size() const {
-    return num_blocks() * block_size();
+    return num_blocks() << log2_block_size();
+  }
+};
+
+struct NandConfig {
+  std::uint8_t log2_page_size;
+  std::uint8_t log2_ppb;
+
+  [[nodiscard]] constexpr std::uint8_t log2_block_size() const {
+    return log2_page_size + log2_ppb;
+  };
+  [[nodiscard]] constexpr std::size_t page_size() const { return 1u << log2_page_size; }
+  [[nodiscard]] constexpr std::size_t pages_per_block() const { return 1u << log2_ppb; };
+  [[nodiscard]] constexpr std::size_t block_size() const { return 1u << log2_block_size(); }
+};
+
+template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_>
+class Nand : public NandBase {
+ public:
+  static constexpr NandConfig config = {log2_page_size_, log2_ppb_};
+
+  /* Base-2 logarithm of the page size. If your device supports
+ * partial programming, you may want to subdivide the actual
+ * pages into separate ECC-correctable regions and present those
+ * as pages.
+ */
+  [[nodiscard]] virtual constexpr std::uint8_t log2_page_size() const noexcept final {
+      return config.log2_page_size;
+  };
+
+  /* Base-2 logarithm of the number of pages within an eraseblock */
+  [[nodiscard]] virtual constexpr std::uint8_t log2_ppb() const noexcept final {
+    return config.log2_ppb;
+  }
+
+  [[nodiscard]] virtual constexpr std::uint8_t log2_block_size() const {
+    return config.log2_block_size();
+  };
+  [[nodiscard]] virtual constexpr std::size_t page_size() const { return config.page_size(); }
+  [[nodiscard]] virtual constexpr std::size_t pages_per_block() const { return config.pages_per_block(); };
+  [[nodiscard]] virtual constexpr std::size_t block_size() const { return config.block_size(); }
+  [[nodiscard]] virtual constexpr std::size_t mem_size() const {
+    return num_blocks() << config.log2_block_size();
   }
 };
 

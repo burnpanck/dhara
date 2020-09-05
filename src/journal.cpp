@@ -79,7 +79,7 @@ int is_aligned(page_t p, int n) { return !(p & ((1 << n) - 1)); }
 int align_eq(page_t a, page_t b, int n) { return !((a ^ b) >> n); }
 
 /* What is the successor of this block? */
-static block_t next_block(const Nand &n, block_t blk) {
+static block_t next_block(const NandBase &n, block_t blk) {
   blk++;
   if (blk >= n.num_blocks()) blk = 0;
 
@@ -158,7 +158,7 @@ void Journal::roll_stats() noexcept {
   this->epoch++;
 }
 
-Journal::Journal(Nand &n, page_buf_t page_buf) noexcept
+Journal::Journal(NandBase &n, page_buf_t page_buf) noexcept
     : nand(n), page_buf(page_buf), log2_ppc(choose_ppc(nand.log2_page_size(), nand.log2_ppb())) {
   reset_journal();
 }
@@ -169,13 +169,12 @@ Journal::Journal(Nand &n, page_buf_t page_buf) noexcept
  */
 int Journal::find_checkblock(block_t blk, block_t *where, error_t *err) const noexcept {
   const std::size_t page_size = this->nand.page_size();
-  Outcome<void> res(error_t::none);
 
   for (int i = 0; (blk < this->nand.num_blocks()) && (i < DHARA_MAX_RETRIES); i++) {
     const page_t p = (blk << this->nand.log2_ppb()) | ((1 << this->log2_ppc) - 1);
 
-    if (!(this->nand.is_bad(blk) || res.pass_and_maybe_store(this->nand.read(p, 0, page_buf)).has_error()) &&
-        hdr_has_magic(this->page_buf)) {
+    if (!(this->nand.is_bad(blk) || (this->nand.read(p, 0, page_buf).handle_legacy_err(err))) &&
+        hdr_has_magic(hdr_cbuf_t(this->page_buf))) {
       *where = blk;
       return 0;
     }
@@ -183,8 +182,7 @@ int Journal::find_checkblock(block_t blk, block_t *where, error_t *err) const no
     blk++;
   }
 
-  res.pass_and_maybe_store( error_t::too_bad);
-  *err = res.error();
+  set_error(err, error_t::too_bad);
   return -1;
 }
 
@@ -196,16 +194,16 @@ block_t Journal::find_last_checkblock(block_t first) const noexcept {
     const block_t mid = (low + high) >> 1;
     block_t found;
 
-    if ((find_checkblock(mid, &found, NULL) < 0) ||
-        (hdr_get_epoch(this->page_buf) != this->epoch)) {
+    if ((find_checkblock(mid, &found, nullptr) < 0) ||
+        (hdr_get_epoch(hdr_cbuf_t(this->page_buf)) != this->epoch)) {
       if (!mid) return first;
 
       high = mid - 1;
     } else {
       block_t nf;
 
-      if (((found + 1) >= this->nand.num_blocks()) || (find_checkblock(found + 1, &nf, NULL) < 0) ||
-          (hdr_get_epoch(this->page_buf) != this->epoch))
+      if (((found + 1) >= this->nand.num_blocks()) || (find_checkblock(found + 1, &nf, nullptr) < 0) ||
+          (hdr_get_epoch(hdr_cbuf_t(this->page_buf)) != this->epoch))
         return found;
 
       low = nf;
@@ -278,8 +276,8 @@ int Journal::find_root(page_t start, error_t *err) noexcept {
   while (i >= 0) {
     const page_t p = (blk << log2_ppb) + ((i + 1) << this->log2_ppc) - 1;
 
-    if (!res.pass_and_maybe_store(this->nand.read(p, 0, page_buf)).has_error() && (hdr_has_magic(this->page_buf)) &&
-        (hdr_get_epoch(this->page_buf) == this->epoch)) {
+    if (!this->nand.read(p, 0, page_buf).handle_legacy_err(err) && (hdr_has_magic(hdr_cbuf_t(this->page_buf))) &&
+        (hdr_get_epoch(hdr_cbuf_t(this->page_buf)) == this->epoch)) {
       this->root_ = p - 1;
       return 0;
     }
@@ -287,8 +285,7 @@ int Journal::find_root(page_t start, error_t *err) noexcept {
     i--;
   }
 
-  res.pass_and_maybe_store( error_t::too_bad);
-  *err = res.error();
+  set_error(err, error_t::too_bad);
   return -1;
 }
 
@@ -332,7 +329,7 @@ int Journal::resume(error_t *err) noexcept {
   }
 
   /* Find the last checkpoint-containing block in this epoch */
-  this->epoch = hdr_get_epoch(this->page_buf);
+  this->epoch = hdr_get_epoch(hdr_cbuf_t(this->page_buf));
   last = find_last_checkblock(first);
 
   /* Find the last programmed checkpoint group in the block */
@@ -347,9 +344,9 @@ int Journal::resume(error_t *err) noexcept {
   }
 
   /* Restore settings from checkpoint */
-  this->tail = hdr_get_tail(this->page_buf);
-  this->bb_current = hdr_get_bb_current(this->page_buf);
-  this->bb_last = hdr_get_bb_last(this->page_buf);
+  this->tail = hdr_get_tail(hdr_cbuf_t(this->page_buf));
+  this->bb_current = hdr_get_bb_current(hdr_cbuf_t(this->page_buf));
+  this->bb_last = hdr_get_bb_last(hdr_cbuf_t(this->page_buf));
   hdr_clear_user(this->page_buf, this->nand.log2_page_size());
 
   /* Perform another linear scan to find the next free user page */
@@ -404,7 +401,7 @@ int Journal::read_meta(page_t p, meta_buf_t buf, error_t *err) noexcept {
   /* Offset of metadata within the metadata page */
   const page_t ppc_mask = (1 << this->log2_ppc) - 1;
   const size_t offset = hdr_user_offset(p & ppc_mask);
-  meta_cbuf_t meta_buf = page_buf.subspan(offset, meta_size);
+  meta_cbuf_t meta_buf(page_buf.subspan(offset, meta_size));
 
   /* Special case: buffered metadata */
   if (align_eq(p, this->head, this->log2_ppc)) {
@@ -553,7 +550,7 @@ int Journal::dump_meta(error_t *err) noexcept {
     error_t my_err;
 
     /* Try to dump metadata on this page */
-    if (!(prepare_head(&my_err) || this->nand.prog(this->head, page_buf).handle_legacy_err(my_err))) {
+    if (!(prepare_head(&my_err) || this->nand.prog(this->head, page_buf).handle_legacy_err(&my_err))) {
       this->recover_meta = this->head;
       this->head = next_upage(this->head);
       if (!this->head) roll_stats();
@@ -633,7 +630,7 @@ int Journal::push_meta(const std::byte *meta, error_t *err) noexcept {
   const page_t old_head = this->head;
   error_t my_err;
   const size_t offset = hdr_user_offset(this->head & ((1 << this->log2_ppc) - 1));
-  meta_buf_t meta_buf = page_buf.subspan(offset, meta_size);
+  meta_buf_t meta_buf(page_buf.subspan(offset, meta_size));
 
   /* We've just written a user page. Add the metadata to the
    * buffer.
@@ -653,13 +650,14 @@ int Journal::push_meta(const std::byte *meta, error_t *err) noexcept {
   /* We don't need to check for immediate recover, because that'll
    * never happen -- we're not block-aligned.
    */
-  hdr_put_magic(this->page_buf);
-  hdr_set_epoch(this->page_buf, this->epoch);
-  hdr_set_tail(this->page_buf, this->tail);
-  hdr_set_bb_current(this->page_buf, this->bb_current);
-  hdr_set_bb_last(this->page_buf, this->bb_last);
+  hdr_buf_t hdr_buf(this->page_buf);
+  hdr_put_magic(hdr_buf);
+  hdr_set_epoch(hdr_buf, this->epoch);
+  hdr_set_tail(hdr_buf, this->tail);
+  hdr_set_bb_current(hdr_buf, this->bb_current);
+  hdr_set_bb_last(hdr_buf, this->bb_last);
 
-  if (this->nand.prog(this->head + 1, this->page_buf).handle_legacy_err(my_err) < 0)
+  if (this->nand.prog(this->head + 1, this->page_buf).handle_legacy_err(&my_err) < 0)
     return recover_from(my_err, err);
 
   this->flags &= ~DHARA_JOURNAL_F_DIRTY;
@@ -682,7 +680,7 @@ int Journal::enqueue(const std::byte *data, const std::byte *meta, error_t *err)
 
   for (i = 0; i < DHARA_MAX_RETRIES; i++) {
     if (!(prepare_head(&my_err) ||
-          (data && this->nand.prog(this->head, {data, this->nand.page_size()}).handle_legacy_err(my_err))))
+          (data && this->nand.prog(this->head, {data, this->nand.page_size()}).handle_legacy_err(&my_err))))
       return push_meta(meta, err);
 
     if (recover_from(my_err, err) < 0) return -1;
@@ -697,7 +695,7 @@ int Journal::copy(page_t p, const std::byte *meta, error_t *err) noexcept {
   int i;
 
   for (i = 0; i < DHARA_MAX_RETRIES; i++) {
-    if (!(prepare_head(&my_err) || this->nand.copy(p, this->head).handle_legacy_err(my_err)))
+    if (!(prepare_head(&my_err) || this->nand.copy(p, this->head).handle_legacy_err(&my_err)))
       return push_meta(meta, err);
 
     if (recover_from(my_err, err) < 0) return -1;

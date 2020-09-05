@@ -55,15 +55,10 @@ class [[nodiscard]] Outcome<void> {
   constexpr explicit operator bool() const noexcept { return has_value(); }
 
   // only for Outcome<void>
-  constexpr Outcome<void> pass_and_maybe_store(Outcome<void> res) noexcept {
-    if (!has_error()) err = res.err;
-    return res;
-  }
-
   [[deprecated("this is a compatibility shim for C-style error handling")]] constexpr int
-  handle_legacy_err(error_t &err) const noexcept {
+  handle_legacy_err(error_t *err) const noexcept {
     if (!has_error()) return 0;
-    err = this->err;
+    if(err) *err = this->err;
     return -1;
   }
 

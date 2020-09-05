@@ -45,6 +45,7 @@ add_library(dhara
         dhara/journal.c
         dhara/map.c
         )
+target_include_directories(dhara PUBLIC .)
 
 add_library(ecc
         ecc/bch.c
@@ -58,7 +59,7 @@ add_library(testutils
         tests/util.c
         tests/jtutil.c
         )
-target_link_libraries(testutils dhara ecc)
+target_link_libraries(testutils PUBLIC dhara ecc)
 
 
 if(FALSE)
@@ -67,7 +68,7 @@ add_library(testutils2
         tests/util.c
         tests/jtutil.c
         )
-target_link_libraries(testutils2 dhara ecc)
+target_link_libraries(testutils2 PUBLIC dhara ecc)
 endif()
 
 
@@ -90,7 +91,7 @@ foreach(test ${tests})
 add_executable(${test}.test
         tests/${test}.c
         )
-target_link_libraries(${test}.test dhara ecc testutils)
+target_link_libraries(${test}.test PRIVATE dhara ecc testutils)
 endforeach()
 
 add_executable(gentab

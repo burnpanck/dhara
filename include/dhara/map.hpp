@@ -44,7 +44,7 @@ struct dhara_map {
  * expense of capacity. You should always initialize the same chip with
  * the same garbage collection ratio.
  */
-void dhara_map_init(struct dhara_map *m, Nand *n, uint8_t *page_buf, uint8_t gc_ratio);
+void dhara_map_init(struct dhara_map *m, NandBase *n, uint8_t *page_buf, uint8_t gc_ratio);
 
 /* Recover stored state, if possible. If there is no valid stored state
  * on the chip, -1 is returned, and an empty map is initialized.

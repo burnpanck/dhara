@@ -51,7 +51,7 @@ void seq_assert(unsigned int seed, std::span<const byte> buf) {
   }
 }
 
-void dabort(const char *message, error_t err) {
+[[noreturn]] void dabort(const char *message, error_t err) {
   fprintf(stderr, "%s: error_t => %s\n", message, strerror(err));
   abort();
 }

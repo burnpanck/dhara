@@ -19,11 +19,12 @@
 #include <stdlib.h>
 #include "sim.h"
 #include "util.h"
+#include "dhara/bytes.h"
 
 #define LOG2_PAGE_SIZE		9u
 #define LOG2_PAGES_PER_BLOCK	3u
 #define LOG2_BLOCK_SIZE		(LOG2_PAGE_SIZE + LOG2_PAGES_PER_BLOCK)
-#define NUM_BLOCKS    4096
+#define NUM_BLOCKS    113u
 
 #define PAGE_SIZE		(1u << LOG2_PAGE_SIZE)
 #define PAGES_PER_BLOCK		(1u << LOG2_PAGES_PER_BLOCK)

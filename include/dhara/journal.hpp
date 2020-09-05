@@ -87,7 +87,7 @@ class Journal {
    *
    * No NAND operations are performed at this point.
    */
-  Journal(Nand &n, page_buf_t page_buf) noexcept;
+  Journal(NandBase &n, page_buf_t page_buf) noexcept;
 
   /* Start up the journal -- search the NAND for the journal head, or
    * initialize a blank journal if one isn't found. Returns 0 on success
@@ -111,9 +111,9 @@ class Journal {
   page_t size() const noexcept;
 
   /* Obtain a pointer to the cookie data */
-  cookie_cbuf_t cookie() const noexcept { return page_buf.subspan(DHARA_HEADER_SIZE, cookie_size); }
+  cookie_cbuf_t cookie() const noexcept { return cookie_cbuf_t(page_buf.subspan(DHARA_HEADER_SIZE, cookie_size)); }
   /* Obtain a pointer to the cookie data */
-  cookie_buf_t cookie() noexcept { return page_buf.subspan(DHARA_HEADER_SIZE, cookie_size); }
+  cookie_buf_t cookie() noexcept { return cookie_buf_t(page_buf.subspan(DHARA_HEADER_SIZE, cookie_size)); }
 
   /* Obtain the locations of the first and last pages in the journal.
    */
@@ -216,7 +216,7 @@ class Journal {
 
   // Member variables are protected not private to give direct access for testing
  protected:
-  Nand &nand;
+  NandBase &nand;
   const page_buf_t page_buf;
 
   /* In the journal, user data is grouped into checkpoints of
