@@ -37,11 +37,11 @@ void seq_gen(unsigned int seed, std::span<std::byte> buf);
 void seq_assert(unsigned int seed, std::span<const std::byte> buf);
 
 #define DHARA_TRY_ABORT(x)                                          \
-  {                                                                 \
+  do {                                                                 \
     auto __dhara_try_abort_res = (x);                               \
     if (__builtin_expect(__dhara_try_abort_res.has_error(), false)) \
       dabort(#x, __dhara_try_abort_res.error());                    \
-  }
+  } while(false)
 
 }  // namespace dhara_tests
 

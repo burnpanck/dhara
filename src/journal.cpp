@@ -349,7 +349,7 @@ Outcome<void> JournalBase::resume() noexcept {
  * Public interface
  */
 
-std::size_t JournalBase::capacity() const noexcept {
+page_count_t JournalBase::capacity() const noexcept {
   const block_t max_bad = bb_last > bb_current ? bb_last : bb_current;
   const block_t good_blocks = nand.num_blocks() - max_bad - 1;
   const int log2_cpb = nand.log2_ppb() - config.log2_ppc;
@@ -359,7 +359,7 @@ std::size_t JournalBase::capacity() const noexcept {
   return (good_cps << config.log2_ppc) - good_cps;
 }
 
-std::size_t JournalBase::size() const noexcept {
+page_count_t JournalBase::size() const noexcept {
   /* Find the number of raw pages, and the number of checkpoints
    * between the head and the tail. The difference between the two
    * is the number of user pages (upper limit).

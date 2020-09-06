@@ -19,90 +19,118 @@
 
 #include <dhara/journal.hpp>
 
+#include <cstdint>
+#include <optional>
+#include <span>
+
 namespace dhara {
 
 /* The map is a journal indexing format. It maps virtual sectors to
  * pages of data in flash memory.
  */
-typedef uint32_t dhara_sector_t;
+using sector_t = std::uint32_t;
+using sector_count_t = std::uint32_t;
 
-/* This sector value is reserved */
-#define DHARA_SECTOR_NONE 0xffffffff
-
-struct dhara_map {
-  struct JournalBase journal;
-
-  uint8_t gc_ratio;
-  dhara_sector_t count;
+struct MapConfig {
+  std::uint8_t gc_ratio;
 };
 
-/* Initialize a map. You need to supply a buffer for page metadata, and
- * a garbage collection ratio. This is the ratio of garbage collection
- * operations to real writes when automatic collection is active.
- *
- * Smaller values lead to faster and more predictable IO, at the
- * expense of capacity. You should always initialize the same chip with
- * the same garbage collection ratio.
- */
-void dhara_map_init(struct dhara_map *m, NandBase *n, uint8_t *page_buf, uint8_t gc_ratio);
+class MapBase : public JournalSpec<132u, 4u> {
+  using base_t = JournalSpec<132u, 4u>;
 
-/* Recover stored state, if possible. If there is no valid stored state
- * on the chip, -1 is returned, and an empty map is initialized.
- */
-int dhara_map_resume(struct dhara_map *m, error_t *err);
+ protected:
+  static constexpr std::size_t meta_size = 132u;
+  static constexpr std::size_t cookie_size = 4u;
 
-/* Clear the map (delete all sectors). */
-void dhara_map_clear(struct dhara_map *m);
+  using meta_buf_t = std::array<std::byte, meta_size>;
 
-/* Obtain the maximum capacity of the map. */
-dhara_sector_t dhara_map_capacity(const struct dhara_map *m);
+ public:
+  static constexpr sector_t sector_none = static_cast<sector_t>(-1);
 
-/* Obtain the current number of allocated sectors. */
-inline dhara_sector_t dhara_map_size(const struct dhara_map *m) { return m->count; }
+  /* Recover stored state, if possible. If there is no valid stored state
+   * on the chip, -1 is returned, and an empty map is initialized.
+   */
+  Outcome<void> resume() noexcept;
 
-/* Find the physical page which holds the current data for this sector.
- * Returns 0 on success or -1 if an error occurs. If the sector doesn't
- * exist, the error is E_NOT_FOUND.
- */
-int dhara_map_find(struct dhara_map *m, dhara_sector_t s, page_t *loc, error_t *err);
+  /* Clear the map (delete all sectors). */
+  void clear() noexcept;
 
-/* Read from the given logical sector. If the sector is unmapped, a
- * blank page (0xff) will be returned.
- */
-int dhara_map_read(struct dhara_map *m, dhara_sector_t s, uint8_t *data, error_t *err);
+  /* Obtain the maximum capacity of the map. */
+  sector_t capacity() const noexcept;
 
-/* Write data to a logical sector. */
-int dhara_map_write(struct dhara_map *m, dhara_sector_t s, const uint8_t *data, error_t *err);
+  /* Obtain the current number of allocated sectors. */
+  sector_t size() const noexcept { return count; }
 
-/* Copy any flash page to a logical sector. */
-int dhara_map_copy_page(struct dhara_map *m, page_t src, dhara_sector_t dst, error_t *err);
+  /* Find the physical page which holds the current data for this sector.
+   * Returns 0 on success or -1 if an error occurs. If the sector doesn't
+   * exist, the error is E_NOT_FOUND.
+   */
+  Outcome<page_t> find(sector_t s) noexcept;
 
-/* Copy one sector to another. If the source sector is unmapped, the
- * destination sector will be trimmed.
- */
-int dhara_map_copy_sector(struct dhara_map *m, dhara_sector_t src, dhara_sector_t dst,
-                          error_t *err);
+  /* Copy any flash page to a logical sector. */
+  Outcome<void> copy_page(page_t src, sector_t dst) noexcept;
 
-/* Delete a logical sector. You don't necessarily need to do this, but
- * it's a useful hint if you no longer require the sector's data to be
- * kept.
- *
- * If order is non-zero, it specifies that all sectors in the
- * (2**order)-aligned group of s are to be deleted.
- */
-int dhara_map_trim(struct dhara_map *m, dhara_sector_t s, error_t *err);
+  /* Copy one sector to another. If the source sector is unmapped, the
+   * destination sector will be trimmed.
+   */
+  Outcome<void> copy_sector(sector_t src, sector_t dst) noexcept;
 
-/* Synchronize the map. Once this returns successfully, all changes to
- * date are persistent and durable. Conversely, there is no guarantee
- * that unsynchronized changes will be persistent.
- */
-int dhara_map_sync(struct dhara_map *m, error_t *err);
+  /* Delete a logical sector. You don't necessarily need to do this, but
+   * it's a useful hint if you no longer require the sector's data to be
+   * kept.
+   *
+   * If order is non-zero, it specifies that all sectors in the
+   * (2**order)-aligned group of s are to be deleted.
+   */
+  Outcome<void> trim(sector_t s) noexcept;
 
-/* Perform one garbage collection step. You can do this whenever you
- * like, but it's not necessary -- garbage collection happens
- * automatically and is interleaved with other operations.
- */
-int dhara_map_gc(struct dhara_map *m, error_t *err);
+  /* Synchronize the map. Once this returns successfully, all changes to
+   * date are persistent and durable. Conversely, there is no guarantee
+   * that unsynchronized changes will be persistent.
+   */
+  Outcome<void> sync() noexcept;
+
+  /* Perform one garbage collection step. You can do this whenever you
+   * like, but it's not necessary -- garbage collection happens
+   * automatically and is interleaved with other operations.
+   */
+  Outcome<void> gc() noexcept;
+
+ protected:
+  /* Initialize a map. You need to supply a buffer for page metadata, and
+   * a garbage collection ratio. This is the ratio of garbage collection
+   * operations to real writes when automatic collection is active.
+   *
+   * Smaller values lead to faster and more predictable IO, at the
+   * expense of capacity. You should always initialize the same chip with
+   * the same garbage collection ratio.
+   */
+  MapBase(const JournalConfig &config, const MapConfig &map_config, NandBase &n,
+          byte_buf_t page_buf) noexcept;
+
+  /* Write data to a logical sector. */
+  Outcome<void> write(sector_t s, const std::byte *data) noexcept;
+
+  /* Read from the given logical sector. If the sector is unmapped, a
+   * blank page (0xff) will be returned.
+   */
+  Outcome<void> read(sector_t s, std::byte *data) noexcept;
+
+ private:
+  Outcome<page_t> trace_path(sector_t target,
+                                      std::optional<meta_span_t> new_meta) noexcept;
+  Outcome<void> raw_gc(page_t src) noexcept;
+  Outcome<void> pad_queue() noexcept;
+  Outcome<void> try_recover(error_t cause) noexcept;
+  Outcome<void> auto_gc() noexcept;
+  Outcome<void> prepare_write(sector_t dst, meta_span_t meta) noexcept;
+  Outcome<void> try_delete(sector_t s) noexcept;
+
+ private:
+  const MapConfig &map_config;
+
+  sector_count_t count;
+};
 
 }  // namespace dhara
 

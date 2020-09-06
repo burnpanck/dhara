@@ -9,7 +9,7 @@ set(CMAKE_VERBOSE_MAKEFILE ON)
 add_library(dhara-cpp
         src/error.cpp
         src/journal.cpp
-#        src/map.cpp
+        src/map.cpp
         )
 target_include_directories(dhara-cpp PUBLIC include/)
 

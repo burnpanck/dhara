@@ -31,7 +31,7 @@ using namespace std;
 using namespace dhara;
 using namespace dhara_tests;
 
-static dhara_sector_t sector_list[NUM_SECTORS];
+static sector_t sector_list[NUM_SECTORS];
 
 static void shuffle(int seed) {
   int i;
@@ -48,42 +48,42 @@ static void shuffle(int seed) {
   }
 }
 
-static int check_recurse(struct dhara_map *m, page_t parent, page_t page, dhara_sector_t id_expect,
-                         int depth) {
-  uint8_t meta[DHARA_META_SIZE];
+static int check_recurse(MapBase &m, page_t parent, page_t page, sector_t id_expect,
+                         unsigned int depth) {
+  uint8_t meta[m.config.meta_size];
   error_t err;
-  const page_t h_offset = m->journal.head - m->journal.tail;
-  const page_t p_offset = parent - m->journal.tail;
-  const page_t offset = page - m->journal.tail;
-  dhara_sector_t id;
+  const page_t h_offset = m.head - m.tail;
+  const page_t p_offset = parent - m.tail;
+  const page_t offset = page - m.tail;
+  sector_t id;
   int count = 1;
-  int i;
+  unsigned int i;
 
-  if (page == DHARA_PAGE_NONE) return 0;
+  if (page == MapBase::page_none) return 0;
 
   /* Make sure this is a valid journal user page, and one which is
    * older than the page pointing to it.
    */
   assert(offset < p_offset);
   assert(offset < h_offset);
-  assert((~page) & ((1 << m->journal.log2_ppc) - 1));
+  assert((~page) & ((1u << m.config.log2_ppc) - 1u));
 
   /* Fetch metadata */
-  if (dhara_journal_read_meta(&m->journal, page, meta, &err) < 0) dabort("mt_check", err);
+  if (m.read_meta(page, meta, &err) < 0) dabort("mt_check", err);
 
   /* Check the first <depth> bits of the ID field */
   id = dhara_r32(meta);
   if (!depth) {
     id_expect = id;
   } else {
-    assert(!((id ^ id_expect) >> (32 - depth)));
+    assert(!((id ^ id_expect) >> (32u - depth)));
   }
 
   /* Check all alt-pointers */
-  for (i = depth; i < 32; i++) {
-    page_t child = dhara_r32(meta + (i << 2) + 4);
+  for (i = depth; i < 32u; i++) {
+    page_t child = dhara_r32(meta + (i << 2u) + 4u);
 
-    count += check_recurse(m, page, child, id ^ (1 << (31 - i)), i + 1);
+    count += check_recurse(m, page, child, id ^ (1u << (31u - i)), i + 1u);
   }
 
   return count;
@@ -99,7 +99,7 @@ static void mt_check(struct dhara_map *m) {
   assert(m->count == count);
 }
 
-static void mt_write(struct dhara_map *m, dhara_sector_t s, int seed) {
+static void mt_write(struct dhara_map *m, sector_t s, int seed) {
   const size_t page_size = 1 << m->journal.nand->log2_page_size();
   uint8_t buf[page_size];
   error_t err;
@@ -108,7 +108,7 @@ static void mt_write(struct dhara_map *m, dhara_sector_t s, int seed) {
   if (dhara_map_write(m, s, buf, &err) < 0) dabort("map_write", err);
 }
 
-static void mt_assert(struct dhara_map *m, dhara_sector_t s, int seed) {
+static void mt_assert(struct dhara_map *m, sector_t s, int seed) {
   const size_t page_size = 1 << m->journal.nand->log2_page_size();
   uint8_t buf[page_size];
   error_t err;
@@ -118,13 +118,13 @@ static void mt_assert(struct dhara_map *m, dhara_sector_t s, int seed) {
   seq_assert(seed, buf, sizeof(buf));
 }
 
-static void mt_trim(struct dhara_map *m, dhara_sector_t s) {
+static void mt_trim(struct dhara_map *m, sector_t s) {
   error_t err;
 
   if (dhara_map_trim(m, s, &err) < 0) dabort("map_trim", err);
 }
 
-static void mt_assert_blank(struct dhara_map *m, dhara_sector_t s) {
+static void mt_assert_blank(struct dhara_map *m, sector_t s) {
   error_t err;
   page_t loc;
   int r;
@@ -162,7 +162,7 @@ int main(void) {
   printf("Writing sectors...\n");
   shuffle(0);
   for (i = 0; i < NUM_SECTORS; i++) {
-    const dhara_sector_t s = sector_list[i];
+    const sector_t s = sector_list[i];
 
     mt_write(&map, s, s);
     mt_check(&map);
@@ -180,7 +180,7 @@ int main(void) {
   printf("Read back...\n");
   shuffle(1);
   for (i = 0; i < NUM_SECTORS; i++) {
-    const dhara_sector_t s = sector_list[i];
+    const sector_t s = sector_list[i];
 
     mt_assert(&map, s, s);
   }
@@ -188,8 +188,8 @@ int main(void) {
   printf("Rewrite/trim half...\n");
   shuffle(2);
   for (i = 0; i < NUM_SECTORS; i += 2) {
-    const dhara_sector_t s0 = sector_list[i];
-    const dhara_sector_t s1 = sector_list[i + 1];
+    const sector_t s0 = sector_list[i];
+    const sector_t s1 = sector_list[i + 1];
 
     mt_write(&map, s0, ~s0);
     mt_check(&map);
@@ -208,8 +208,8 @@ int main(void) {
 
   printf("Read back...\n");
   for (i = 0; i < NUM_SECTORS; i += 2) {
-    const dhara_sector_t s0 = sector_list[i];
-    const dhara_sector_t s1 = sector_list[i + 1];
+    const sector_t s0 = sector_list[i];
+    const sector_t s1 = sector_list[i + 1];
 
     mt_assert(&map, s0, ~s0);
     mt_assert_blank(&map, s1);

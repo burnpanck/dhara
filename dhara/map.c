@@ -18,11 +18,11 @@
 #include "bytes.h"
 #include "map.h"
 
-#define DHARA_RADIX_DEPTH	(sizeof(dhara_sector_t) << 3u)
+#define radix_depth (sizeof(dhara_sector_t) << 3u)
 
 static inline dhara_sector_t d_bit(int depth)
 {
-	return ((dhara_sector_t)1) << (DHARA_RADIX_DEPTH - depth - 1);
+	return ((dhara_sector_t)1) << (radix_depth - depth - 1);
 }
 
 /************************************************************************
@@ -136,7 +136,7 @@ static int trace_path(struct dhara_map *m, dhara_sector_t target,
 	if (dhara_journal_read_meta(&m->journal, p, meta, err) < 0)
 		return -1;
 
-	while (depth < DHARA_RADIX_DEPTH) {
+	while (depth < radix_depth) {
 		const dhara_sector_t id = meta_get_id(meta);
 
 		if (id == DHARA_SECTOR_NONE)
@@ -171,7 +171,7 @@ static int trace_path(struct dhara_map *m, dhara_sector_t target,
 
 not_found:
 	if (new_meta) {
-		while (depth < DHARA_RADIX_DEPTH)
+		while (depth < radix_depth)
 			meta_set_alt(new_meta, depth++, DHARA_SECTOR_NONE);
 	}
 
@@ -415,7 +415,7 @@ static int try_delete(struct dhara_map *m, dhara_sector_t s,
 	uint8_t meta[DHARA_META_SIZE];
 	dhara_page_t alt_page;
 	uint8_t alt_meta[DHARA_META_SIZE];
-	int level = DHARA_RADIX_DEPTH - 1;
+	int level = radix_depth - 1;
 	int i;
 
 	if (trace_path(m, s, NULL, meta, &my_err) < 0) {
@@ -452,7 +452,7 @@ static int try_delete(struct dhara_map *m, dhara_sector_t s,
 	meta_set_id(meta, meta_get_id(alt_meta));
 
 	meta_set_alt(meta, level, DHARA_PAGE_NONE);
-	for (i = level + 1; i < DHARA_RADIX_DEPTH; i++)
+	for (i = level + 1; i < radix_depth; i++)
 		meta_set_alt(meta, i, meta_get_alt(alt_meta, i));
 
 	meta_set_alt(meta, level, DHARA_PAGE_NONE);

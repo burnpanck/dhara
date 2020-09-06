@@ -19,64 +19,66 @@
 
 #include <cstring>
 
-#define DHARA_RADIX_DEPTH (sizeof(dhara_sector_t) << 3u)
-
 namespace dhara {
 
-dhara_sector_t d_bit(int depth) { return ((dhara_sector_t)1) << (DHARA_RADIX_DEPTH - depth - 1); }
+static constexpr std::size_t radix_depth = sizeof(sector_t) << 3u;
+
+sector_t d_bit(int depth) { return ((sector_t)1) << (radix_depth - depth - 1); }
 
 /************************************************************************
  * Metadata/cookie layout
  */
 
-void ck_set_count(std::byte *cookie, dhara_sector_t count) { dhara_w32(cookie, count); }
+void ck_set_count(std::span<std::byte,4> cookie, sector_t count) { w32(cookie, count); }
 
-dhara_sector_t ck_get_count(const std::byte *cookie) { return dhara_r32(cookie); }
+sector_t ck_get_count(std::span<const std::byte,4> cookie) { return r32(cookie); }
 
-void meta_clear(std::byte *meta) { memset(meta, 0xff, DHARA_META_SIZE); }
+void meta_clear(std::span<std::byte,132> meta) { memset(meta.data(), 0xff, meta.size()); }
 
-dhara_sector_t meta_get_id(const std::byte *meta) { return dhara_r32(meta); }
+sector_t meta_get_id(std::span<const std::byte,132> meta) { return r32(meta.first<4>()); }
 
-void meta_set_id(std::byte *meta, dhara_sector_t id) { dhara_w32(meta, id); }
+void meta_set_id(std::span<std::byte,132> meta, sector_t id) { w32(meta.first<4>(), id); }
 
-page_t meta_get_alt(const std::byte *meta, int level) { return dhara_r32(meta + 4 + (level << 2)); }
+page_t meta_get_alt(std::span<const std::byte,132> meta, unsigned int level) {
+  return r32(std::span<const std::byte, 4>(meta.subspan(4u + (level << 2u),4)));
+}
 
-void meta_set_alt(std::byte *meta, int level, page_t alt) {
-  dhara_w32(meta + 4 + (level << 2), alt);
+void meta_set_alt(std::span<std::byte,132> meta, unsigned int level, page_t alt) {
+  w32(std::span<std::byte, 4>(meta.subspan(4u + (level << 2u),4)), alt);
 }
 
 /************************************************************************
  * Public interface
  */
 
-void dhara_map_init(struct dhara_map *m, NandBase *n, std::byte *page_buf, uint8_t gc_ratio) {
-  if (!gc_ratio) gc_ratio = 1;
+MapBase::MapBase(const JournalConfig &config, const MapConfig &map_config, NandBase &n,
+                 byte_buf_t page_buf) noexcept
+    : base_t(config, n, page_buf), map_config(map_config) {}
 
-  dhara_journal_init(&m->journal, n, page_buf);
-  m->gc_ratio = gc_ratio;
-}
-
-int dhara_map_resume(struct dhara_map *m, error_t *err) {
-  if (dhara_journal_resume(&m->journal, err) < 0) {
-    m->count = 0;
-    return -1;
+Outcome<void> MapBase::resume() noexcept {
+  {
+    auto res = base_t::resume();
+    if (res.has_error()) {
+      count = 0;
+      return res.error();
+    }
   }
 
-  m->count = ck_get_count(dhara_journal_cookie(&m->journal));
-  return 0;
+  count = ck_get_count(cookie());
+  return error_t::none;
 }
 
-void dhara_map_clear(struct dhara_map *m) {
-  if (m->count) {
-    m->count = 0;
-    dhara_journal_clear(&m->journal);
+void MapBase::clear() noexcept {
+  if (count) {
+    count = 0;
+    base_t::clear();
   }
 }
 
-dhara_sector_t dhara_map_capacity(const struct dhara_map *m) {
-  const dhara_sector_t cap = dhara_journal_capacity(&m->journal);
-  const dhara_sector_t reserve = cap / (m->gc_ratio + 1);
-  const dhara_sector_t safety_margin = DHARA_MAX_RETRIES << m->journal.nand->log2_ppb();
+sector_t MapBase::capacity() const noexcept {
+  const sector_t cap = base_t::capacity();
+  const sector_t reserve = cap / (map_config.gc_ratio + 1);
+  const sector_t safety_margin = config.max_retries << config.nand.log2_ppb;
 
   if (reserve + safety_margin >= cap) return 0;
 
@@ -92,261 +94,238 @@ dhara_sector_t dhara_map_capacity(const struct dhara_map *m) {
  * (containing PAGE_NONE alt-pointers), and DHARA_E_NOT_FOUND will be
  * returned.
  */
-static int trace_path(struct dhara_map *m, dhara_sector_t target, page_t *loc, std::byte *new_meta,
-                      error_t *err) {
-  std::byte meta[DHARA_META_SIZE];
+Outcome<page_t> MapBase::trace_path(sector_t target, std::optional<meta_span_t> new_meta) noexcept {
+  meta_buf_t meta;
   int depth = 0;
-  page_t p = dhara_journal_root(&m->journal);
+  page_t p = root();
 
-  if (new_meta) meta_set_id(new_meta, target);
+  if (new_meta) meta_set_id(*new_meta, target);
 
-  if (p == DHARA_PAGE_NONE) goto not_found;
+  if (p != page_none) {
+    DHARA_TRY(read_meta(p, meta));
 
-  if (dhara_journal_read_meta(&m->journal, p, meta, err) < 0) return -1;
+    bool done = true;
+    while (depth < radix_depth) {
+      const sector_t id = meta_get_id(meta);
 
-  while (depth < DHARA_RADIX_DEPTH) {
-    const dhara_sector_t id = meta_get_id(meta);
-
-    if (id == DHARA_SECTOR_NONE) goto not_found;
-
-    if ((target ^ id) & d_bit(depth)) {
-      if (new_meta) meta_set_alt(new_meta, depth, p);
-
-      p = meta_get_alt(meta, depth);
-      if (p == DHARA_PAGE_NONE) {
-        depth++;
-        goto not_found;
+      if (id == sector_none) {
+        done = false;
+        break;
       }
 
-      if (dhara_journal_read_meta(&m->journal, p, meta, err) < 0) return -1;
-    } else {
-      if (new_meta) meta_set_alt(new_meta, depth, meta_get_alt(meta, depth));
-    }
+      if ((target ^ id) & d_bit(depth)) {
+        if (new_meta) meta_set_alt(*new_meta, depth, p);
 
-    depth++;
+        p = meta_get_alt(meta, depth);
+        if (p == page_none) {
+          depth++;
+          done = false;
+          break;
+        }
+
+        DHARA_TRY(read_meta(p, meta));
+      } else {
+        if (new_meta) meta_set_alt(*new_meta, depth, meta_get_alt(meta, depth));
+      }
+
+      depth++;
+    }
+    if (done) return p;
   }
 
-  if (loc) *loc = p;
-
-  return 0;
-
-not_found:
   if (new_meta) {
-    while (depth < DHARA_RADIX_DEPTH) meta_set_alt(new_meta, depth++, DHARA_SECTOR_NONE);
+    while (depth < radix_depth) meta_set_alt(*new_meta, depth++, sector_none);
   }
 
-  set_error(err, error_t::not_found);
-  return -1;
+  return error_t::not_found;
 }
 
-int dhara_map_find(struct dhara_map *m, dhara_sector_t target, page_t *loc, error_t *err) {
-  return trace_path(m, target, loc, NULL, err);
-}
+Outcome<page_t> MapBase::find(sector_t target) noexcept { return trace_path(target, {}); }
 
-int dhara_map_read(struct dhara_map *m, dhara_sector_t s, std::byte *data, error_t *err) {
-  const NandBase *n = m->journal.nand;
-  error_t my_err;
-  page_t p;
-  const std::size_t page_size = n->page_size();
-  if (dhara_map_find(m, s, &p, &my_err) < 0) {
-    if (my_err == error_t::not_found) {
+Outcome<void> MapBase::read(sector_t s, std::byte *data) noexcept {
+  const std::size_t page_size = config.nand.page_size();
+  auto res = find(s);
+  if (res.has_error()) {
+    if (res.error() == error_t::not_found) {
       memset(data, 0xff, page_size);
-      return 0;
+      return error_t::none;
     }
-
-    set_error(err, my_err);
-    return -1;
+    return res.error();
   }
 
-  return n->read(p, 0, {data, page_size}, err);
+  return nand.read(res.value(), 0, {data, page_size});
 }
 
 /* Check the given page. If it's garbage, do nothing. Otherwise, rewrite
  * it at the front of the map. Return raw errors from the journal (do
  * not perform recovery).
  */
-static int raw_gc(struct dhara_map *m, page_t src, error_t *err) {
-  dhara_sector_t target;
+Outcome<void> MapBase::raw_gc(page_t src) noexcept {
+  sector_t target;
   page_t current;
-  error_t my_err;
-  std::byte meta[DHARA_META_SIZE];
+  meta_buf_t meta;
 
-  if (dhara_journal_read_meta(&m->journal, src, meta, err) < 0) return -1;
+  DHARA_TRY(read_meta(src, meta));
 
   /* Is the page just filler/garbage? */
   target = meta_get_id(meta);
-  if (target == DHARA_SECTOR_NONE) return 0;
+  if (target == sector_none) return error_t::none;
 
   /* Find out where the sector once represented by this page
    * currently resides (if anywhere).
    */
-  if (trace_path(m, target, &current, meta, &my_err) < 0) {
-    if (my_err == error_t::not_found) return 0;
-
-    set_error(err, my_err);
-    return -1;
+  {
+    auto res = trace_path(target, meta);
+    if (res.has_error()) {
+      if (res.error() == error_t::not_found) return error_t::none;
+      return res.error();
+    }
+    current = res.value();
   }
 
   /* Is this page still the most current representative? If not,
    * do nothing.
    */
-  if (current != src) return 0;
+  if (current != src) return error_t::none;
 
   /* Rewrite it at the front of the journal with updated metadata */
-  ck_set_count(dhara_journal_cookie(&m->journal), m->count);
-  if (dhara_journal_copy(&m->journal, src, meta, err) < 0) return -1;
-
-  return 0;
+  ck_set_count(cookie(), this->count);
+  return copy(src, meta);
 }
 
-static int pad_queue(struct dhara_map *m, error_t *err) {
-  page_t p = dhara_journal_root(&m->journal);
-  std::byte root_meta[DHARA_META_SIZE];
+Outcome<void> MapBase::pad_queue() noexcept {
+  page_t p = root();
+  meta_buf_t root_meta;
 
-  ck_set_count(dhara_journal_cookie(&m->journal), m->count);
+  ck_set_count(cookie(), count);
 
-  if (p == DHARA_PAGE_NONE) return dhara_journal_enqueue(&m->journal, NULL, NULL, err);
+  if (p == page_none) return enqueue();
 
-  if (dhara_journal_read_meta(&m->journal, p, root_meta, err) < 0) return -1;
+  DHARA_TRY(read_meta(p, root_meta));
 
-  return dhara_journal_copy(&m->journal, p, root_meta, err);
+  return copy(p, root_meta);
 }
 
 /* Attempt to recover the journal */
-static int try_recover(struct dhara_map *m, error_t cause, error_t *err) {
+Outcome<void> MapBase::try_recover(error_t cause) noexcept {
   int restart_count = 0;
 
   if (cause != error_t::recover) {
-    set_error(err, cause);
-    return -1;
+    return cause;
   }
 
-  while (dhara_journal_in_recovery(&m->journal)) {
-    page_t p = dhara_journal_next_recoverable(&m->journal);
-    error_t my_err;
-    int ret;
+  while (in_recovery()) {
+    page_t p = next_recoverable();
 
-    if (p == DHARA_PAGE_NONE)
-      ret = pad_queue(m, &my_err);
-    else
-      ret = raw_gc(m, p, &my_err);
+    auto res = p == page_none ? pad_queue() : raw_gc(p);
 
-    if (ret < 0) {
-      if (my_err != error_t::recover) {
-        set_error(err, my_err);
-        return -1;
+    if (res.has_error()) {
+      if (res.error() != error_t::recover) {
+        return res.error();
       }
 
-      if (restart_count >= DHARA_MAX_RETRIES) {
-        set_error(err, error_t::too_bad);
-        return -1;
+      if (restart_count >= config.max_retries) {
+        return error_t::too_bad;
       }
 
       restart_count++;
     }
   }
 
-  return 0;
+  return error_t::none;
 }
 
-static int auto_gc(struct dhara_map *m, error_t *err) {
-  int i;
+Outcome<void> MapBase::auto_gc() noexcept {
+  if (base_t::size() < capacity()) return error_t::none;
 
-  if (dhara_journal_size(&m->journal) < dhara_map_capacity(m)) return 0;
+  for (int i = 0; i < map_config.gc_ratio; i++) {
+    DHARA_TRY(gc());
+  }
 
-  for (i = 0; i < m->gc_ratio; i++)
-    if (dhara_map_gc(m, err) < 0) return -1;
-
-  return 0;
+  return error_t::none;
 }
 
-static int prepare_write(struct dhara_map *m, dhara_sector_t dst, std::byte *meta, error_t *err) {
-  error_t my_err;
+Outcome<void> MapBase::prepare_write(sector_t dst, meta_span_t meta) noexcept {
+  DHARA_TRY(auto_gc());
 
-  if (auto_gc(m, err) < 0) return -1;
-
-  if (trace_path(m, dst, NULL, meta, &my_err) < 0) {
-    if (my_err != error_t::not_found) {
-      set_error(err, my_err);
-      return -1;
+  auto res = trace_path(dst, meta);
+  if (res.has_error()) {
+    if (res.error() != error_t::not_found) {
+      return res.error();
     }
 
-    if (m->count >= dhara_map_capacity(m)) {
-      set_error(err, error_t::map_full);
-      return -1;
+    if (count >= capacity()) {
+      return error_t::map_full;
     }
 
-    m->count++;
+    count++;
   }
 
-  ck_set_count(dhara_journal_cookie(&m->journal), m->count);
-  return 0;
+  ck_set_count(cookie(), count);
+  return error_t::none;
 }
 
-int dhara_map_write(struct dhara_map *m, dhara_sector_t dst, const std::byte *data, error_t *err) {
+Outcome<void> MapBase::write(sector_t dst, const std::byte *data) noexcept {
+  meta_buf_t meta;
   for (;;) {
-    std::byte meta[DHARA_META_SIZE];
-    error_t my_err;
-    const dhara_sector_t old_count = m->count;
+    const sector_t old_count = count;
 
-    if (prepare_write(m, dst, meta, err) < 0) return -1;
+    DHARA_TRY(prepare_write(dst, meta));
 
-    if (!dhara_journal_enqueue(&m->journal, data, meta, &my_err)) break;
+    auto res = enqueue(data, meta);
+    if (res.has_value()) break;
 
-    m->count = old_count;
+    count = old_count;
 
-    if (try_recover(m, my_err, err) < 0) return -1;
+    DHARA_TRY(try_recover(res.error()));
   }
 
-  return 0;
+  return error_t::none;
 }
 
-int dhara_map_copy_page(struct dhara_map *m, page_t src, dhara_sector_t dst, error_t *err) {
+Outcome<void> MapBase::copy_page(page_t src, sector_t dst) noexcept {
+  meta_buf_t meta;
   for (;;) {
-    std::byte meta[DHARA_META_SIZE];
-    error_t my_err;
-    const dhara_sector_t old_count = m->count;
+    const sector_t old_count = count;
 
-    if (prepare_write(m, dst, meta, err) < 0) return -1;
+    DHARA_TRY(prepare_write(dst, meta));
 
-    if (!dhara_journal_copy(&m->journal, src, meta, &my_err)) break;
+    auto res = copy(src, meta);
+    if (res.has_value()) break;
 
-    m->count = old_count;
+    count = old_count;
 
-    if (try_recover(m, my_err, err) < 0) return -1;
+    DHARA_TRY(try_recover(res.error()));
   }
 
-  return 0;
+  return error_t::none;
 }
 
-int dhara_map_copy_sector(struct dhara_map *m, dhara_sector_t src, dhara_sector_t dst,
-                          error_t *err) {
-  error_t my_err;
-  page_t p;
+Outcome<void> MapBase::copy_sector(sector_t src, sector_t dst) noexcept {
+  auto res = find(src);
+  if (res.has_error()) {
+    if (res.error() == error_t::not_found) return trim(dst);
 
-  if (dhara_map_find(m, src, &p, &my_err) < 0) {
-    if (my_err == error_t::not_found) return dhara_map_trim(m, dst, err);
-
-    set_error(err, my_err);
-    return -1;
+    return res.error();
   }
 
-  return dhara_map_copy_page(m, p, dst, err);
+  return copy_page(res.value(), dst);
 }
 
-static int try_delete(struct dhara_map *m, dhara_sector_t s, error_t *err) {
+Outcome<void> MapBase::try_delete(sector_t s) noexcept {
   error_t my_err;
-  std::byte meta[DHARA_META_SIZE];
+  meta_buf_t meta;
   page_t alt_page;
-  std::byte alt_meta[DHARA_META_SIZE];
-  int level = DHARA_RADIX_DEPTH - 1;
+  meta_buf_t alt_meta;
+  int level = radix_depth - 1;
   int i;
 
-  if (trace_path(m, s, NULL, meta, &my_err) < 0) {
-    if (my_err == error_t::not_found) return 0;
-
-    set_error(err, my_err);
-    return -1;
+  {
+    auto res = trace_path(s, meta);
+    if (res.has_error()) {
+      if (res.error() == error_t::not_found) return error_t::none;
+      return res.error();
+    }
   }
 
   /* Select any of the closest cousins of this node which are
@@ -354,87 +333,86 @@ static int try_delete(struct dhara_map *m, dhara_sector_t s, error_t *err) {
    */
   while (level >= 0) {
     alt_page = meta_get_alt(meta, level);
-    if (alt_page != DHARA_PAGE_NONE) break;
+    if (alt_page != page_none) break;
     level--;
   }
 
   /* Special case: deletion of last sector */
   if (level < 0) {
-    m->count = 0;
-    dhara_journal_clear(&m->journal);
-    return 0;
+    clear();
+    return error_t::none;
   }
 
   /* Rewrite the cousin with an up-to-date path which doesn't
    * point to the original node.
    */
-  if (dhara_journal_read_meta(&m->journal, alt_page, alt_meta, err) < 0) return -1;
+  DHARA_TRY(read_meta(alt_page, alt_meta));
 
   meta_set_id(meta, meta_get_id(alt_meta));
 
-  meta_set_alt(meta, level, DHARA_PAGE_NONE);
-  for (i = level + 1; i < DHARA_RADIX_DEPTH; i++) meta_set_alt(meta, i, meta_get_alt(alt_meta, i));
+  meta_set_alt(meta, level, page_none);
+  for (i = level + 1; i < radix_depth; i++) meta_set_alt(meta, i, meta_get_alt(alt_meta, i));
 
-  meta_set_alt(meta, level, DHARA_PAGE_NONE);
+  meta_set_alt(meta, level, page_none);
 
-  ck_set_count(dhara_journal_cookie(&m->journal), m->count - 1);
-  if (dhara_journal_copy(&m->journal, alt_page, meta, err) < 0) return -1;
+  ck_set_count(cookie(), count - 1);
+  DHARA_TRY(copy(alt_page, meta));
 
-  m->count--;
-  return 0;
+  count--;
+  return error_t::none;
 }
 
-int dhara_map_trim(struct dhara_map *m, dhara_sector_t s, error_t *err) {
+Outcome<void> MapBase::trim(sector_t s) noexcept {
   for (;;) {
-    error_t my_err;
+    DHARA_TRY(auto_gc());
 
-    if (auto_gc(m, err) < 0) return -1;
+    auto res = try_delete(s);
+    if (res.has_value()) break;
 
-    if (!try_delete(m, s, &my_err)) break;
-
-    if (try_recover(m, my_err, err) < 0) return -1;
+    DHARA_TRY(try_recover(res.error()));
   }
 
-  return 0;
+  return error_t::none;
 }
 
-int dhara_map_sync(struct dhara_map *m, error_t *err) {
-  while (!dhara_journal_is_clean(&m->journal)) {
-    page_t p = dhara_journal_peek(&m->journal);
-    error_t my_err;
-    int ret;
+Outcome<void> MapBase::sync() noexcept {
+  while (!is_clean()) {
+    page_t p = peek();
+    Outcome<void> res(error_t::none);
 
-    if (p == DHARA_PAGE_NONE) {
-      ret = pad_queue(m, &my_err);
+    if (p == page_none) {
+      res = pad_queue();
     } else {
-      ret = raw_gc(m, p, &my_err);
-      dhara_journal_dequeue(&m->journal);
+      res = raw_gc(p);
+      dequeue();
     }
 
-    if ((ret < 0) && (try_recover(m, my_err, err) < 0)) return -1;
+    if (res.has_error()) {
+      DHARA_TRY(try_recover(res.error()));
+    }
   }
 
-  return 0;
+  return error_t::none;
 }
 
-int dhara_map_gc(struct dhara_map *m, error_t *err) {
-  if (!m->count) return 0;
+Outcome<void> MapBase::gc() noexcept {
+  if (!count) return error_t::none;
 
   for (;;) {
-    page_t tail = dhara_journal_peek(&m->journal);
-    error_t my_err;
+    page_t tail = peek();
 
-    if (tail == DHARA_PAGE_NONE) break;
+    if (tail == page_none) break;
 
-    if (!raw_gc(m, tail, &my_err)) {
-      dhara_journal_dequeue(&m->journal);
+    auto res = raw_gc(tail);
+    if (res.has_value()) {
+      dequeue();
       break;
     }
 
-    if (try_recover(m, my_err, err) < 0) return -1;
+    DHARA_TRY(try_recover(res.error()));
   }
 
-  return 0;
+  return error_t::none;
 }
 
 }  // namespace dhara

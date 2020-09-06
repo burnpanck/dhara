@@ -30,10 +30,12 @@ namespace dhara {
  * view a page number is being a concatenation (in binary) of a block
  * number and the number of a page within a block.
  */
-typedef uint32_t page_t;
+using page_t = std::uint32_t;
+using page_count_t = std::uint32_t;
 
 /* Blocks are also indexed, starting at 0. */
-typedef uint32_t block_t;
+using block_t = std::uint32_t;
+using block_count_t = std::uint32_t;
 
 /* Each NAND chip must be represented by one of these structures. It's
  * intended that this structure be embedded in a larger structure for
@@ -134,8 +136,8 @@ class Nand : public Base {
  public:
   static constexpr NandConfig config = {log2_page_size_, log2_ppb_};
 
-  using page_buf_t = std::span<std::byte, config.page_size()>;
-  using page_cbuf_t = std::span<const std::byte, config.page_size()>;
+  using page_span_t = std::span<std::byte, config.page_size()>;
+  using page_cspan_t = std::span<const std::byte, config.page_size()>;
 
   /* Base-2 logarithm of the page size. If your device supports
    * partial programming, you may want to subdivide the actual
@@ -157,7 +159,7 @@ class Nand : public Base {
   [[nodiscard]] virtual constexpr std::size_t page_size() const noexcept final {
     return config.page_size();
   }
-  [[nodiscard]] virtual constexpr std::size_t pages_per_block() const noexcept final {
+  [[nodiscard]] virtual constexpr page_count_t pages_per_block() const noexcept final {
     return config.pages_per_block();
   };
   [[nodiscard]] virtual constexpr std::size_t block_size() const noexcept final {
@@ -175,7 +177,7 @@ class Nand : public Base {
  * Pages will be programmed sequentially within a block, and will not be
  * reprogrammed.
  */
-  virtual Outcome<void> prog(page_t p, page_cbuf_t data) noexcept {
+  virtual Outcome<void> prog(page_t p, page_cspan_t data) noexcept {
     return base_t::prog(p, data.data());
   }
 };

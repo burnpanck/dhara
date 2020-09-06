@@ -27,7 +27,7 @@
 namespace dhara {
 
 struct JournalConfig {
-  NandConfig nand;
+  const NandConfig nand;
 
   /* Global metadata available for a higher layer. This metadata is
    * persistent once the journal reaches a checkpoint, and is restored on
@@ -114,12 +114,12 @@ class JournalBase {
   /* Obtain an upper bound on the number of user pages storable in the
    * journal.
    */
-  [[nodiscard]] std::size_t capacity() const noexcept;
+  [[nodiscard]] page_count_t capacity() const noexcept;
 
   /* Obtain an upper bound on the number of user pages consumed by the
    * journal.
    */
-  [[nodiscard]] std::size_t size() const noexcept;
+  [[nodiscard]] page_count_t size() const noexcept;
 
   /* Obtain the locations of the first and last pages in the journal.
    */
@@ -191,6 +191,9 @@ class JournalBase {
 
   Outcome<void> read_meta(page_t p, std::byte *buf) noexcept;
   Outcome<void> enqueue(const std::byte *data, const std::byte *meta) noexcept;
+  Outcome<void> enqueue() noexcept {
+    return enqueue(nullptr, nullptr);
+  }
   Outcome<void> copy(page_t p, const std::byte *meta) noexcept;
 
  private:
@@ -244,8 +247,8 @@ class JournalBase {
    * the number of bad blocks in all blocks before the current
    * head.
    */
-  block_t bb_current;
-  block_t bb_last;
+  block_count_t bb_current;
+  block_count_t bb_last;
 
   /* Log head and tail. The tail pointer points to the last user
    * page in the log, and the head pointer points to the next free
@@ -272,87 +275,67 @@ class JournalBase {
   page_t recover_meta;
 };
 
-template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_, std::size_t meta_size_ = 132u,
-          std::size_t cookie_size_ = 4u, std::size_t max_retries_ = 8u, typename Base = JournalBase>
-class Journal : public Base {
+
+
+
+template <std::size_t meta_size_ = 132u,
+    std::size_t cookie_size_ = 4u, typename Base = JournalBase>
+class JournalSpec : public Base {
   using base_t = Base;
-  static constexpr JournalConfig make_config() {
-    return {
-        .nand = {.log2_page_size = log2_page_size_, .log2_ppb = log2_ppb_},
-        .meta_size = meta_size_,
-        .cookie_size = cookie_size_,
-        .max_retries = max_retries_,
-        .log2_ppc = base_t::choose_ppc(cookie_size_, meta_size_, log2_page_size_, 6u)
-    };
-  }
  public:
-  static constexpr JournalConfig config = {
-      .nand = {.log2_page_size = log2_page_size_, .log2_ppb = log2_ppb_},
-      .meta_size = meta_size_,
-      .cookie_size = cookie_size_,
-      .max_retries = max_retries_,
-      .log2_ppc = base_t::choose_ppc(cookie_size_, meta_size_, log2_page_size_, 6u)
-  };
-
-  using page_buf_t = std::span<std::byte, make_config().nand.page_size()>;
-  using page_cbuf_t = std::span<const std::byte, make_config().nand.page_size()>;
-  using meta_buf_t = std::span<std::byte, config.meta_size>;
-  using meta_cbuf_t = std::span<const std::byte, config.meta_size>;
-  using cookie_buf_t = std::span<std::byte, config.cookie_size>;
-  using cookie_cbuf_t = std::span<const std::byte, config.cookie_size>;
-
-  template <typename NBase>
-  Journal(Nand<log2_page_size_,log2_ppb_,NBase> &nand, page_buf_t page_buf)
-       : base_t(config, nand, page_buf) {}
+  using meta_span_t = std::span<std::byte, meta_size_>;
+  using meta_cspan_t = std::span<const std::byte, meta_size_>;
+  using cookie_span_t = std::span<std::byte, cookie_size_>;
+  using cookie_cspan_t = std::span<const std::byte, cookie_size_>;
 
  protected:
-  [[nodiscard]] page_buf_t get_page_buf() noexcept {
-    return page_buf_t(base_t::page_buf_ptr, config.nand.page_size());
-  }
-  [[nodiscard]] page_cbuf_t get_page_buf() const noexcept {
-    return {base_t::page_buf_ptr, config.nand.page_size()};
-  }
+  using base_t::base_t;
+
   template <std::size_t offset, std::size_t extent = std::dynamic_extent>
   [[nodiscard]] auto get_page_buf_subspan() noexcept {
-    return get_page_buf().template subspan<offset, extent>();
+    return std::span<std::byte, extent>(base_t::page_buf_ptr + offset, extent);
   }
   template <std::size_t offset, std::size_t extent = std::dynamic_extent>
   [[nodiscard]] auto get_page_buf_subspan() const noexcept {
-    return get_page_buf().template subspan<offset, extent>();
+    return std::span<const std::byte, extent>(base_t::page_buf_ptr + offset, extent);
+  }
+
+  /* Append a page to the journal. Both raw page data and metadata must be
+ * specified. The push operation is not persistent until a checkpoint is
+ * reached.
+ *
+ * This operation may fail with the error code E_RECOVER. If this
+ * occurs, the upper layer must complete the assisted recovery procedure
+ * and then try again.
+ *
+ * This operation may be used as part of a recovery. If further errors
+ * occur during recovery, E_RECOVER is returned, and the procedure must
+ * be restarted.
+ */
+  Outcome<void> enqueue(const std::byte *data, meta_cspan_t meta) noexcept {
+    return base_t::enqueue(data,meta.data());
+  }
+
+  Outcome<void> enqueue() noexcept {
+    return base_t::enqueue();
   }
 
  public:
   /* Obtain a pointer to the cookie data */
-  [[nodiscard]] cookie_cbuf_t cookie() const noexcept {
-    return get_page_buf_subspan<base_t::header_size, config.cookie_size>();
+  [[nodiscard]] cookie_cspan_t cookie() const noexcept {
+    return get_page_buf_subspan<base_t::header_size, cookie_size_>();
   }
   /* Obtain a pointer to the cookie data */
-  [[nodiscard]] cookie_buf_t cookie() noexcept {
-    return get_page_buf_subspan<base_t::header_size, config.cookie_size>();
+  [[nodiscard]] cookie_span_t cookie() noexcept {
+    return get_page_buf_subspan<base_t::header_size, cookie_size_>();
   }
 
   /* Read metadata associated with a page. This assumes that the page
    * provided is a valid data page. The actual page data is read via the
    * normal NAND interface.
    */
-  Outcome<void> read_meta(page_t p, meta_buf_t buf) noexcept {
+  Outcome<void> read_meta(page_t p, meta_span_t buf) noexcept {
     return base_t::read_meta(p,buf.data());
-  }
-
-  /* Append a page to the journal. Both raw page data and metadata must be
-   * specified. The push operation is not persistent until a checkpoint is
-   * reached.
-   *
-   * This operation may fail with the error code E_RECOVER. If this
-   * occurs, the upper layer must complete the assisted recovery procedure
-   * and then try again.
-   *
-   * This operation may be used as part of a recovery. If further errors
-   * occur during recovery, E_RECOVER is returned, and the procedure must
-   * be restarted.
-   */
-  Outcome<void> enqueue(page_cbuf_t data, meta_cbuf_t meta) noexcept {
-    return base_t::enqueue(data.data(),meta.data());
   }
 
   /* Copy an existing page to the front of the journal. New metadata must
@@ -367,13 +350,73 @@ class Journal : public Base {
    * occur during recovery, E_RECOVER is returned, and the procedure must
    * be restarted.
    */
-  Outcome<void> copy(page_t p, meta_cbuf_t meta) noexcept {
+  Outcome<void> copy(page_t p, meta_cspan_t meta) noexcept {
     return base_t::copy(p, meta.data());
   }
 };
 
-template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_, typename NBase, std::size_t page_buf_size>
-Journal(Nand<log2_page_size_,log2_ppb_,NBase> &nand, std::span<std::byte,page_buf_size> page_buf)
+template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_, std::size_t meta_size_ = 132u,
+          std::size_t cookie_size_ = 4u, std::size_t max_retries_ = 8u, typename Base = JournalSpec<meta_size_,cookie_size_>>
+class Journal : public Base {
+  using base_t = Base;
+  static constexpr JournalConfig make_config() {
+    return {
+        .nand = {.log2_page_size = log2_page_size_, .log2_ppb = log2_ppb_},
+        .meta_size = meta_size_,
+        .cookie_size = cookie_size_,
+        .max_retries = max_retries_,
+        .log2_ppc = base_t::choose_ppc(cookie_size_, meta_size_, log2_page_size_, 6u)
+    };
+  }
+ public:
+  static constexpr JournalConfig config = make_config();
+
+  using page_span_t = std::span<std::byte, make_config().nand.page_size()>;
+  using page_cspan_t = std::span<const std::byte, make_config().nand.page_size()>;
+  using meta_span_t = typename base_t::meta_span_t;
+  using meta_cspan_t = typename base_t::meta_cspan_t;
+  using cookie_span_t = typename base_t::cookie_span_t;
+  using cookie_cspan_t = typename base_t::cookie_cspan_t;
+
+  template <typename NBase>
+  explicit Journal(Nand<log2_page_size_,log2_ppb_,NBase> &nand)
+       : base_t(config, nand, page_buf) {}
+
+ protected:
+  [[nodiscard]] page_span_t get_page_buf() noexcept {
+    return page_buf;
+  }
+  [[nodiscard]] page_cspan_t get_page_buf() const noexcept {
+    return page_buf;
+  }
+
+ public:
+  /* Append a page to the journal. Both raw page data and metadata must be
+   * specified. The push operation is not persistent until a checkpoint is
+   * reached.
+   *
+   * This operation may fail with the error code E_RECOVER. If this
+   * occurs, the upper layer must complete the assisted recovery procedure
+   * and then try again.
+   *
+   * This operation may be used as part of a recovery. If further errors
+   * occur during recovery, E_RECOVER is returned, and the procedure must
+   * be restarted.
+   */
+  Outcome<void> enqueue(page_cspan_t data, meta_cspan_t meta) noexcept {
+    return base_t::enqueue(data.data(),meta);
+  }
+
+  Outcome<void> enqueue() noexcept {
+    return base_t::enqueue();
+  }
+
+ private:
+  std::array<std::byte, page_span_t::extent> page_buf;
+};
+
+template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_, typename NBase>
+Journal(Nand<log2_page_size_,log2_ppb_,NBase> &nand)
  -> Journal<log2_page_size_, log2_ppb_>;
 
 }  // namespace dhara
