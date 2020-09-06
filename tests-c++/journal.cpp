@@ -29,15 +29,15 @@ using namespace std;
 using namespace dhara;
 using namespace dhara_tests;
 
-void suspend_resume(TestJournal &j) {
+void suspend_resume(TestJournalBase &j) {
   const page_t old_root = j.root();
   const auto old_ends = j.end_pointers();
   error_t err;
 
   j.clear();
-  assert(j.root() == DHARA_PAGE_NONE);
+  assert(j.root() == TestJournalBase::page_none);
 
-  if (j.resume(&err) < 0) dabort("resume", err);
+  DHARA_TRY_ABORT(j.resume());
 
   assert(old_root == j.root());
   assert(old_ends == j.end_pointers());
@@ -46,15 +46,15 @@ void suspend_resume(TestJournal &j) {
 StaticSimNand sim_nand;
 
 int main() {
-  constexpr size_t page_size = sim_nand.page_size_;
+  constexpr size_t page_size = sim_nand.config.page_size();
   std::array<std::byte, page_size> page_buf;
-  TestJournal journal(sim_nand, page_buf);
+  TestJournal journal(sim_nand, std::span(page_buf));
 
   sim_nand.reset();
   sim_nand.inject_bad(20);
 
   printf("Journal init\n");
-  journal.resume(nullptr);
+  (void) journal.resume();
   journal.dump_info();
   printf("\n");
 

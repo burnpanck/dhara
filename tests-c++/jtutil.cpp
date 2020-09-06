@@ -29,14 +29,14 @@ using namespace std;
 
 namespace dhara_tests {
 
-void TestJournal::check_upage(page_t p) const {
-  const page_t mask = (1 << log2_ppc) - 1;
+void TestJournalBase::check_upage(page_t p) const {
+  const page_t mask = (1 << config.log2_ppc) - 1;
 
   assert((~p) & mask);
   assert(p < (nand.num_blocks() << nand.log2_ppb()));
 }
 
-void TestJournal::check() const {
+void TestJournalBase::check() const {
   /* Head and tail pointers always point to a valid user-page
    * index (never a meta-page, and never out-of-bounds).
    */
@@ -66,42 +66,41 @@ void TestJournal::check() const {
     check_upage(root_);
     assert(root_offset < raw_size);
   } else {
-    assert(root_ == DHARA_PAGE_NONE);
+    assert(root_ == page_none);
   }
 }
 
-void TestJournal::recover() {
+void TestJournalBase::recover() {
   int retry_count = 0;
 
   printf("    recover: start\n");
 
   while (in_recovery()) {
     const page_t p = next_recoverable();
-    error_t err;
-    int ret;
+    check();
+
+    auto res = [&]() {
+      if (p == page_none) {
+        return JournalBase::enqueue(nullptr, nullptr);
+      } else {
+        std::byte meta[config.meta_size];
+
+        DHARA_TRY_ABORT(read_meta(p, meta));
+
+        return copy(p, meta);
+      }
+    }();
 
     check();
 
-    if (p == DHARA_PAGE_NONE) {
-      ret = Journal::enqueue(nullptr, nullptr, &err);
-    } else {
-      std::byte meta[DHARA_META_SIZE];
-
-      if (read_meta(p, meta, &err) < 0) dabort("read_meta", err);
-
-      ret = copy(p, meta, &err);
-    }
-
-    check();
-
-    if (ret < 0) {
-      if (err == error_t::recover) {
+    if (res.has_error()) {
+      if (res.error() == error_t::recover) {
         printf("    recover: restart\n");
-        if (++retry_count >= DHARA_MAX_RETRIES) dabort("recover", error_t::too_bad);
+        if (++retry_count >= config.max_retries) dabort("recover", error_t::too_bad);
         continue;
       }
 
-      dabort("copy", err);
+      dabort("copy", res.error());
     }
   }
 
@@ -109,49 +108,48 @@ void TestJournal::recover() {
   printf("    recover: complete\n");
 }
 
-int TestJournal::enqueue(uint32_t id, error_t *err) {
-  const std::size_t page_size = 1 << nand.log2_page_size();
+Outcome<void> TestJournalBase::enqueue(uint32_t id) {
+  const std::size_t page_size = 1u << config.nand.log2_page_size;
   std::byte r[page_size];
-  std::byte meta[DHARA_META_SIZE];
+  std::byte meta[config.meta_size];
   error_t my_err;
 
   seq_gen(id, {r, page_size});
   dhara_w32(meta, id);
 
-  for (int i = 0; i < DHARA_MAX_RETRIES; i++) {
+  for (int i = 0; i < config.max_retries; i++) {
     check();
-    if (!Journal::enqueue(r, meta, &my_err)) return 0;
+    auto res = JournalBase::enqueue(r, meta);
+      if(res.has_value())  return res;
 
-    if (my_err != error_t::recover) {
-      set_error(err, my_err);
-      return -1;
+    if (res.error() != error_t::recover) {
+      return res;
     }
 
     recover();
   }
 
-  set_error(err, error_t::too_bad);
-  return -1;
+  return error_t::too_bad;
 }
 
-int TestJournal::enqueue_sequence(int start, int count) {
+int TestJournalBase::enqueue_sequence(int start, int count) {
   if (count < 0) count = nand.num_blocks() << nand.log2_ppb();
 
   for (int i = 0; i < count; i++) {
-    std::byte meta[DHARA_META_SIZE];
-    page_t root;
-    error_t err;
+    std::byte meta[config.meta_size];
 
-    if (enqueue(start + i, &err) < 0) {
-      if (err == error_t::journal_full) return i;
+    {
+      auto res = enqueue(start + i);
+      if (res.has_error()) {
+        if (res.error() == error_t::journal_full) return i;
 
-      dabort("enqueue", err);
+        dabort("enqueue", res.error());
+      }
     }
 
     assert(size() >= i);
-    root = this->root();
 
-    if (read_meta(root, meta, &err) < 0) dabort("read_meta", err);
+    DHARA_TRY_ABORT(read_meta(this->root(), meta));
     auto t = dhara_r32(meta);
     assert(t == start + i);
     assert(dhara_r32(meta) == start + i);
@@ -160,20 +158,19 @@ int TestJournal::enqueue_sequence(int start, int count) {
   return count;
 }
 
-void TestJournal::dequeue_sequence(int next, int count) {
-  const int max_garbage = 1 << log2_ppc;
+void TestJournalBase::dequeue_sequence(int next, int count) {
+  const int max_garbage = 1u << config.log2_ppc;
   int garbage_count = 0;
 
   while (count > 0) {
-    std::byte meta[DHARA_META_SIZE];
+    std::byte meta[config.meta_size];
     uint32_t id;
     page_t tail = peek();
-    error_t err;
 
-    assert(tail != DHARA_PAGE_NONE);
+    assert(tail != page_none);
 
     check();
-    if (read_meta(tail, meta, &err) < 0) dabort("read_meta", err);
+    DHARA_TRY_ABORT(read_meta(tail, meta));
 
     check();
     dequeue();
@@ -191,8 +188,7 @@ void TestJournal::dequeue_sequence(int next, int count) {
       next++;
       count--;
 
-      Outcome<void> res(error_t::none);
-      if ((res = nand.read(tail, 0, {r, page_size})).has_error()) dabort("nand_read", res.error());
+      DHARA_TRY_ABORT(nand.read(tail, 0, {r, page_size}));
 
       seq_assert(id, {r, page_size});
     }
@@ -201,10 +197,10 @@ void TestJournal::dequeue_sequence(int next, int count) {
   check();
 }
 
-void TestJournal::dump_info() const {
-  printf("    log2_ppc   = %d\n", log2_ppc);
-  printf("    size       = %d\n", size());
-  printf("    capacity   = %d\n", capacity());
+void TestJournalBase::dump_info() const {
+  printf("    log2_ppc   = %d\n", config.log2_ppc);
+  printf("    size       = %lu\n", size());
+  printf("    capacity   = %lu\n", capacity());
   printf("    bb_current = %d\n", bb_current);
   printf("    bb_last    = %d\n", bb_last);
 }

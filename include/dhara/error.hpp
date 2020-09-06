@@ -37,6 +37,27 @@ enum class error_t {
 template <typename T>
 class [[nodiscard]] Outcome {
  public:
+ public:
+  Outcome() = delete;
+  constexpr Outcome(error_t err) noexcept : content(err) {}
+  template <typename U> requires (!std::is_convertible_v<U &&,error_t> && std::is_convertible_v<U &&,T>)
+  constexpr Outcome(U &&v) : content(std::forward<U>(v)) {}
+
+  [[nodiscard]] constexpr bool has_value() const noexcept { return content.index(); }
+  [[nodiscard]] constexpr bool has_error() const noexcept { return !content.index(); }
+  constexpr decltype(auto) value() & noexcept {
+    return std::get<1>(content);
+  }
+  constexpr decltype(auto) value() && noexcept {
+    return std::get<1>(content);
+  }
+  constexpr decltype(auto) value() const & noexcept {
+    return std::get<1>(content);
+  }
+  [[nodiscard]] constexpr error_t error() const noexcept { return std::get<0>(content); }
+
+  constexpr explicit operator bool() const noexcept { return has_value(); }
+
  private:
   std::variant<error_t, T> content;
 };
@@ -67,10 +88,11 @@ class [[nodiscard]] Outcome<void> {
 };
 
 #define DHARA_TRY(x)                                                                          \
-  {                                                                                           \
+  ({                                                                                           \
     auto __dhara_try_res = (x);                                                               \
     if (__builtin_expect(__dhara_try_res.has_error(), false)) return __dhara_try_res.error(); \
-  }
+     __dhara_try_res.value();                                                                                     \
+  })
 
 /* Produce a human-readable error message. This function is kept in a
  * separate compilation unit and can be omitted to reduce binary size.

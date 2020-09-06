@@ -132,7 +132,7 @@ Outcome<void> SimNand::erase(block_t bno) noexcept {
  * Pages will be programmed sequentially within a block, and will not be
  * reprogrammed.
  */
-Outcome<void> SimNand::prog(page_t p, std::span<const std::byte> data) noexcept {
+Outcome<void> SimNand::prog(page_t p, const std::byte *data) noexcept {
   const int bno = p >> log2_ppb();
   const int pno = p & ((1u << log2_ppb()) - 1u);
 
@@ -176,7 +176,7 @@ Outcome<void> SimNand::prog(page_t p, std::span<const std::byte> data) noexcept 
     return error_t::bad_block;
   }
 
-  memcpy(page.data(), data.data(), std::min(page.size_bytes(), data.size_bytes()));
+  memcpy(page.data(), data, page.size_bytes());
   return error_t::none;
 }
 
@@ -241,7 +241,7 @@ Outcome<void> SimNand::copy(page_t src, page_t dst) noexcept {
   auto buf = page_buf();
 
   DHARA_TRY(read(src, 0, buf));
-  DHARA_TRY(prog(dst, buf));
+  DHARA_TRY(prog(dst, buf.data()));
 
   return error_t::none;
 }

@@ -30,7 +30,7 @@ typedef uint32_t dhara_sector_t;
 #define DHARA_SECTOR_NONE 0xffffffff
 
 struct dhara_map {
-  struct Journal journal;
+  struct JournalBase journal;
 
   uint8_t gc_ratio;
   dhara_sector_t count;

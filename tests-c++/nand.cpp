@@ -31,7 +31,7 @@ int main() {
 
   for (int i = 0; i < (1 << sim_nand.log2_ppb()); i++) {
     for (int j = 0; j < sim_nand.num_blocks(); j++) {
-      std::array<std::byte, sim_nand.page_size_> block;
+      std::array<std::byte, sim_nand.page_size()> block;
       page_t p = (j << sim_nand.log2_ppb()) | i;
 
       if (sim_nand.is_bad(j)) continue;
@@ -46,7 +46,7 @@ int main() {
   }
 
   for (int i = 0; i < (sim_nand.num_blocks() << sim_nand.log2_ppb()); i++) {
-    std::array<std::byte, sim_nand.page_size_> block;
+    std::array<std::byte, sim_nand.page_size()> block;
 
     if (sim_nand.is_bad(i >> sim_nand.log2_ppb())) continue;
 

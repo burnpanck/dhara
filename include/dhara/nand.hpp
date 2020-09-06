@@ -68,16 +68,17 @@ class NandBase {
    * Pages will be programmed sequentially within a block, and will not be
    * reprogrammed.
    */
-  virtual Outcome<void> prog(page_t p, std::span<const std::byte> data) noexcept = 0;
+  virtual Outcome<void> prog(page_t p, const std::byte *data) noexcept = 0;
 
   /* Check that the given page is erased */
-  virtual bool is_free(page_t p) const noexcept = 0;
+  [[nodiscard]] virtual bool is_free(page_t p) const noexcept = 0;
 
   /* Read a portion of a page. ECC must be handled by the NAND
    * implementation. Returns 0 on sucess or -1 if an error occurs. If an
    * uncorrectable ECC error occurs, return -1 and set err to E_ECC.
    */
-  virtual Outcome<void> read(page_t p, std::size_t offset, std::span<std::byte> data) const noexcept = 0;
+  virtual Outcome<void> read(page_t p, std::size_t offset,
+                             std::span<std::byte> data) const noexcept = 0;
 
   /* Read a page from one location and reprogram it in another location.
    * This might be done using the chip's internal buffers, but it must use
@@ -98,13 +99,19 @@ class NandBase {
   /* Total number of eraseblocks */
   [[nodiscard]] virtual std::size_t num_blocks() const noexcept = 0;
 
-  [[nodiscard]] virtual constexpr std::uint8_t log2_block_size() const {
+  [[nodiscard]] virtual constexpr std::uint8_t log2_block_size() const noexcept {
     return log2_page_size() + log2_ppb();
   };
-  [[nodiscard]] virtual constexpr std::size_t page_size() const { return 1u << log2_page_size(); }
-  [[nodiscard]] virtual constexpr std::size_t pages_per_block() const { return 1u << log2_ppb(); };
-  [[nodiscard]] virtual constexpr std::size_t block_size() const { return 1u << log2_block_size(); }
-  [[nodiscard]] virtual constexpr std::size_t mem_size() const {
+  [[nodiscard]] virtual constexpr std::size_t page_size() const noexcept {
+    return 1u << log2_page_size();
+  }
+  [[nodiscard]] virtual constexpr std::size_t pages_per_block() const noexcept {
+    return 1u << log2_ppb();
+  };
+  [[nodiscard]] virtual constexpr std::size_t block_size() const noexcept {
+    return 1u << log2_block_size();
+  }
+  [[nodiscard]] virtual constexpr std::size_t mem_size() const noexcept {
     return num_blocks() << log2_block_size();
   }
 };
@@ -121,18 +128,22 @@ struct NandConfig {
   [[nodiscard]] constexpr std::size_t block_size() const { return 1u << log2_block_size(); }
 };
 
-template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_>
-class Nand : public NandBase {
+template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_, typename Base = NandBase>
+class Nand : public Base {
+  using base_t = Base;
  public:
   static constexpr NandConfig config = {log2_page_size_, log2_ppb_};
 
+  using page_buf_t = std::span<std::byte, config.page_size()>;
+  using page_cbuf_t = std::span<const std::byte, config.page_size()>;
+
   /* Base-2 logarithm of the page size. If your device supports
- * partial programming, you may want to subdivide the actual
- * pages into separate ECC-correctable regions and present those
- * as pages.
- */
+   * partial programming, you may want to subdivide the actual
+   * pages into separate ECC-correctable regions and present those
+   * as pages.
+   */
   [[nodiscard]] virtual constexpr std::uint8_t log2_page_size() const noexcept final {
-      return config.log2_page_size;
+    return config.log2_page_size;
   };
 
   /* Base-2 logarithm of the number of pages within an eraseblock */
@@ -140,14 +151,32 @@ class Nand : public NandBase {
     return config.log2_ppb;
   }
 
-  [[nodiscard]] virtual constexpr std::uint8_t log2_block_size() const {
+  [[nodiscard]] virtual constexpr std::uint8_t log2_block_size() const noexcept final {
     return config.log2_block_size();
   };
-  [[nodiscard]] virtual constexpr std::size_t page_size() const { return config.page_size(); }
-  [[nodiscard]] virtual constexpr std::size_t pages_per_block() const { return config.pages_per_block(); };
-  [[nodiscard]] virtual constexpr std::size_t block_size() const { return config.block_size(); }
-  [[nodiscard]] virtual constexpr std::size_t mem_size() const {
-    return num_blocks() << config.log2_block_size();
+  [[nodiscard]] virtual constexpr std::size_t page_size() const noexcept final {
+    return config.page_size();
+  }
+  [[nodiscard]] virtual constexpr std::size_t pages_per_block() const noexcept final {
+    return config.pages_per_block();
+  };
+  [[nodiscard]] virtual constexpr std::size_t block_size() const noexcept final {
+    return config.block_size();
+  }
+  [[nodiscard]] virtual constexpr std::size_t mem_size() const noexcept {
+    return this->num_blocks() << config.log2_block_size();
+  }
+
+  /* Program the given page. The data pointer is a pointer to an entire
+ * page ((1 << log2_page_size) bytes). The operation status should be
+ * checked. If the operation fails, return -1 and set err to
+ * E_BAD_BLOCK.
+ *
+ * Pages will be programmed sequentially within a block, and will not be
+ * reprogrammed.
+ */
+  virtual Outcome<void> prog(page_t p, page_cbuf_t data) noexcept {
+    return base_t::prog(p, data.data());
   }
 };
 

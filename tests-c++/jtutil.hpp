@@ -23,9 +23,9 @@ namespace dhara_tests {
 
 using namespace dhara;
 
-class TestJournal : public Journal {
+class TestJournalBase : public JournalBase {
  public:
-  using Journal::Journal;
+  using JournalBase::JournalBase;
 
   /* Check the journal's invariants */
   void check() const;
@@ -49,8 +49,20 @@ class TestJournal : public Journal {
  private:
   void check_upage(page_t p) const;
   void recover();
-  int enqueue(uint32_t id, error_t *err);
+  Outcome<void> enqueue(uint32_t id) ;
 };
+
+template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_, std::size_t meta_size_ = 132u,
+    std::size_t cookie_size_ = 4u, std::size_t max_retries_ = 8u>
+class TestJournal : public Journal<log2_page_size_,log2_ppb_,meta_size_,cookie_size_,max_retries_,TestJournalBase> {
+  using base_t = Journal<log2_page_size_,log2_ppb_,meta_size_,cookie_size_,max_retries_,TestJournalBase>;
+ public:
+  using base_t::base_t;
+};
+template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_, typename NBase, std::size_t page_buf_size>
+TestJournal(Nand<log2_page_size_,log2_ppb_,NBase> &nand, std::span<std::byte,page_buf_size> page_buf)
+-> TestJournal<log2_page_size_, log2_ppb_>;
+
 
 }  // namespace dhara_tests
 

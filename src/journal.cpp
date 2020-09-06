@@ -17,6 +17,7 @@
 #include <dhara/bytes.hpp>
 #include <dhara/journal.hpp>
 
+#include <cassert>
 #include <cstring>
 
 namespace dhara {
@@ -25,8 +26,9 @@ namespace dhara {
  * Metapage binary format
  */
 
-using hdr_cbuf_t = std::span<const std::byte, DHARA_HEADER_SIZE>;
-using hdr_buf_t = std::span<std::byte, DHARA_HEADER_SIZE>;
+static constexpr std::size_t header_size = 16u;
+using hdr_cbuf_t = std::span<const std::byte, header_size>;
+using hdr_buf_t = std::span<std::byte, header_size>;
 
 /* Does the page buffer contain a valid checkpoint page? */
 int hdr_has_magic(hdr_cbuf_t buf) {
@@ -57,63 +59,31 @@ page_t hdr_get_bb_last(hdr_cbuf_t buf) { return r32(buf.subspan<12, 4>()); }
 
 void hdr_set_bb_last(hdr_buf_t buf, page_t count) { w32(buf.subspan<12, 4>(), count); }
 
-/* Clear user metadata */
-void hdr_clear_user(std::span<std::byte> buf, uint8_t log2_page_size) {
-  auto user = buf.subspan(DHARA_HEADER_SIZE + DHARA_COOKIE_SIZE);
-  memset(user.data(), 0xff, user.size_bytes());
-}
-
-/* Obtain pointers to user data */
-size_t hdr_user_offset(uint8_t which) {
-  return DHARA_HEADER_SIZE + DHARA_COOKIE_SIZE + which * DHARA_META_SIZE;
-}
-
 /************************************************************************
  * Page geometry helpers
  */
 
 /* Is this page index aligned to N bits? */
-int is_aligned(page_t p, int n) { return !(p & ((1 << n) - 1)); }
+bool is_aligned(page_t p, unsigned int n) { return !(p & ((1u << n) - 1u)); }
 
 /* Are these two pages from the same alignment group? */
-int align_eq(page_t a, page_t b, int n) { return !((a ^ b) >> n); }
+bool align_eq(page_t a, page_t b, unsigned int n) { return !((a ^ b) >> n); }
 
 /* What is the successor of this block? */
-static block_t next_block(const NandBase &n, block_t blk) {
+block_t next_block(const NandBase &n, block_t blk) {
   blk++;
   if (blk >= n.num_blocks()) blk = 0;
 
   return blk;
 }
 
-page_t Journal::next_upage(page_t p) const noexcept {
+page_t JournalBase::next_upage(page_t p) const noexcept {
   p++;
-  if (is_aligned(p + 1, this->log2_ppc)) p++;
+  if (is_aligned(p + 1, config.log2_ppc)) p++;
 
-  if (p >= (this->nand.num_blocks() << this->nand.log2_ppb())) p = 0;
+  if (p >= (nand.num_blocks() << config.nand.log2_ppb)) p = 0;
 
   return p;
-}
-
-/* Calculate a checkpoint period: the largest value of ppc such that
- * (2**ppc - 1) metadata blocks can fit on a page with one journal
- * header.
- */
-constexpr int choose_ppc(int log2_page_size, int max) {
-  const int max_meta = (1 << log2_page_size) - DHARA_HEADER_SIZE - DHARA_COOKIE_SIZE;
-  int total_meta = DHARA_META_SIZE;
-  int ppc = 1;
-
-  while (ppc < max) {
-    total_meta <<= 1;
-    total_meta += DHARA_META_SIZE;
-
-    if (total_meta > max_meta) break;
-
-    ppc++;
-  }
-
-  return ppc;
 }
 
 /************************************************************************
@@ -121,45 +91,49 @@ constexpr int choose_ppc(int log2_page_size, int max) {
  */
 
 /* Clear recovery status */
-void Journal::clear_recovery() noexcept {
-  this->recover_next = DHARA_PAGE_NONE;
-  this->recover_root = DHARA_PAGE_NONE;
-  this->recover_meta = DHARA_PAGE_NONE;
-  this->flags &= ~(DHARA_JOURNAL_F_BAD_META | DHARA_JOURNAL_F_RECOVERY | DHARA_JOURNAL_F_ENUM_DONE);
+void JournalBase::clear_recovery() noexcept {
+  recover_next = page_none;
+  recover_root = page_none;
+  recover_meta = page_none;
+  flags[int(Flag::bad_meta)] = false;
+  flags[int(Flag::recovery)] = false;
+  flags[int(Flag::enum_done)] = false;
 }
 
 /* Set up an empty journal */
-void Journal::reset_journal() noexcept {
+void JournalBase::reset_journal() noexcept {
   /* We don't yet have a bad block estimate, so make a
    * conservative guess.
    */
-  this->epoch = 0;
-  this->bb_last = this->nand.num_blocks() >> 6;
-  this->bb_current = 0;
+  epoch = 0;
+  bb_last = nand.num_blocks() >> 6u;
+  bb_current = 0;
 
-  this->flags = 0;
+  flags = 0;
 
   /* Empty journal */
-  this->head = 0;
-  this->tail = 0;
-  this->tail_sync = 0;
-  this->root_ = DHARA_PAGE_NONE;
+  head = 0;
+  tail = 0;
+  tail_sync = 0;
+  root_ = page_none;
 
   /* No recovery required */
   clear_recovery();
 
   /* Empty metadata buffer */
-  memset(this->page_buf.data(), 0xff, page_buf.size_bytes());
+  auto page_buf = this->page_buf();
+  memset(page_buf.data(), 0xff, page_buf.size_bytes());
 }
 
-void Journal::roll_stats() noexcept {
-  this->bb_last = this->bb_current;
-  this->bb_current = 0;
-  this->epoch++;
+void JournalBase::roll_stats() noexcept {
+  bb_last = bb_current;
+  bb_current = 0;
+  epoch++;
 }
 
-Journal::Journal(NandBase &n, page_buf_t page_buf) noexcept
-    : nand(n), page_buf(page_buf), log2_ppc(choose_ppc(nand.log2_page_size(), nand.log2_ppb())) {
+JournalBase::JournalBase(const JournalConfig &config, NandBase &n, byte_buf_t page_buf) noexcept
+    : config(config), nand(n), page_buf_ptr(page_buf.data()) {
+  assert(page_buf.size() == config.nand.page_size());
   reset_journal();
 }
 
@@ -167,46 +141,45 @@ Journal::Journal(NandBase &n, page_buf_t page_buf) noexcept
  * checkpoints at all, then it must contain one in the first checkpoint
  * location -- otherwise, we would have considered the block eraseable.
  */
-int Journal::find_checkblock(block_t blk, block_t *where, error_t *err) const noexcept {
-  const std::size_t page_size = this->nand.page_size();
+Outcome<block_t> JournalBase::find_checkblock(block_t blk) noexcept {
+  const std::size_t page_size = nand.page_size();
+  const auto page_buf = this->page_buf();
 
-  for (int i = 0; (blk < this->nand.num_blocks()) && (i < DHARA_MAX_RETRIES); i++) {
-    const page_t p = (blk << this->nand.log2_ppb()) | ((1 << this->log2_ppc) - 1);
+  for (int i = 0; (blk < nand.num_blocks()) && (i < config.max_retries); i++) {
+    const page_t p = (blk << nand.log2_ppb()) | ((1u << config.log2_ppc) - 1u);
 
-    if (!(this->nand.is_bad(blk) || (this->nand.read(p, 0, page_buf).handle_legacy_err(err))) &&
-        hdr_has_magic(hdr_cbuf_t(this->page_buf))) {
-      *where = blk;
-      return 0;
+    if (!(nand.is_bad(blk) || nand.read(p, 0, page_buf).has_error()) &&
+        hdr_has_magic(hdr_cbuf_t(page_buf))) {
+      return blk;
     }
 
     blk++;
   }
 
-  set_error(err, error_t::too_bad);
-  return -1;
+  return error_t::too_bad;
 }
 
-block_t Journal::find_last_checkblock(block_t first) const noexcept {
+block_t JournalBase::find_last_checkblock(block_t first) noexcept {
   block_t low = first;
-  block_t high = this->nand.num_blocks() - 1;
+  block_t high = nand.num_blocks() - 1;
+  const auto page_buf = this->page_buf();
 
   while (low <= high) {
-    const block_t mid = (low + high) >> 1;
-    block_t found;
+    const block_t mid = (low + high) >> 1u;
+    auto res = find_checkblock(mid);
 
-    if ((find_checkblock(mid, &found, nullptr) < 0) ||
-        (hdr_get_epoch(hdr_cbuf_t(this->page_buf)) != this->epoch)) {
+    if (res.has_error() || (hdr_get_epoch(hdr_cbuf_t(page_buf)) != epoch)) {
       if (!mid) return first;
 
       high = mid - 1;
     } else {
-      block_t nf;
+      block_t found = res.value();
 
-      if (((found + 1) >= this->nand.num_blocks()) || (find_checkblock(found + 1, &nf, nullptr) < 0) ||
-          (hdr_get_epoch(hdr_cbuf_t(this->page_buf)) != this->epoch))
-        return found;
+      if ((found + 1) >= nand.num_blocks()) return found;
+      auto res2 = find_checkblock(found + 1);
+      if (res2.has_error() || (hdr_get_epoch(hdr_cbuf_t(page_buf)) != epoch)) return found;
 
-      low = nf;
+      low = res2.value();
     }
   }
 
@@ -230,18 +203,17 @@ block_t Journal::find_last_checkblock(block_t first) const noexcept {
  * the group is truly unprogrammed, or if it was partially programmed
  * with some all-0xff user pages (which changes nothing for us).
  */
-int Journal::cp_free(page_t first_user) const noexcept {
-  const int count = 1 << this->log2_ppc;
-  int i;
+bool JournalBase::cp_free(page_t first_user) const noexcept {
+  const int count = 1u << config.log2_ppc;
 
-  for (i = 0; i < count; i++)
-    if (!this->nand.is_free(first_user + i)) return 0;
+  for (int i = 0; i < count; i++)
+    if (!nand.is_free(first_user + i)) return false;
 
-  return 1;
+  return true;
 }
 
-page_t Journal::find_last_group(block_t blk) const noexcept {
-  const int num_groups = 1 << (this->nand.log2_ppb() - this->log2_ppc);
+page_t JournalBase::find_last_group(block_t blk) const noexcept {
+  const int num_groups = 1u << (config.nand.log2_ppb - config.log2_ppc);
   int low = 0;
   int high = num_groups - 1;
 
@@ -252,45 +224,46 @@ page_t Journal::find_last_group(block_t blk) const noexcept {
    * last programmed one.
    */
   while (low <= high) {
-    int mid = (low + high) >> 1;
-    const page_t p = (mid << this->log2_ppc) | (blk << this->nand.log2_ppb());
+    int mid = (low + high) >> 1u;
+    const page_t p = (mid << config.log2_ppc) | (blk << config.nand.log2_ppb);
 
     if (cp_free(p)) {
       high = mid - 1;
-    } else if (((mid + 1) >= num_groups) || cp_free(p + (1 << this->log2_ppc))) {
+    } else if (((mid + 1) >= num_groups) || cp_free(p + (1u << config.log2_ppc))) {
       return p;
     } else {
       low = mid + 1;
     }
   }
 
-  return blk << this->nand.log2_ppb();
+  return blk << config.nand.log2_ppb;
 }
 
-int Journal::find_root(page_t start, error_t *err) noexcept {
-  const std::uint8_t log2_ppb = this->nand.log2_ppb();
+Outcome<void> JournalBase::find_root(page_t start) noexcept {
+  const std::uint8_t log2_ppb = config.nand.log2_ppb;
   const block_t blk = start >> log2_ppb;
-  int i = (start & ((1 << log2_ppb) - 1)) >> this->log2_ppc;
-  Outcome<void> res(error_t::none);
+  const auto page_buf = this->page_buf();
+  int i = (start & ((1u << log2_ppb) - 1u)) >> config.log2_ppc;
 
   while (i >= 0) {
-    const page_t p = (blk << log2_ppb) + ((i + 1) << this->log2_ppc) - 1;
+    const page_t p = (blk << log2_ppb) + ((i + 1u) << config.log2_ppc) - 1u;
 
-    if (!this->nand.read(p, 0, page_buf).handle_legacy_err(err) && (hdr_has_magic(hdr_cbuf_t(this->page_buf))) &&
-        (hdr_get_epoch(hdr_cbuf_t(this->page_buf)) == this->epoch)) {
-      this->root_ = p - 1;
-      return 0;
+    if (nand.read(p, 0, page_buf).has_value() && (hdr_has_magic(hdr_cbuf_t(page_buf))) &&
+        (hdr_get_epoch(hdr_cbuf_t(page_buf)) == epoch)) {
+      root_ = p - 1;
+      return error_t::none;
     }
 
     i--;
   }
 
-  set_error(err, error_t::too_bad);
-  return -1;
+  return error_t::too_bad;
 }
 
-int Journal::find_head(page_t start, error_t *err) noexcept {
-  this->head = start;
+Outcome<void> JournalBase::find_head(page_t start) noexcept {
+  const std::uint8_t log2_ppb = config.nand.log2_ppb;
+
+  head = start;
 
   /* Starting from the last good checkpoint, find either:
    *
@@ -302,34 +275,38 @@ int Journal::find_head(page_t start, error_t *err) noexcept {
    */
   do {
     /* Skip to the next userpage */
-    this->head = next_upage(this->head);
-    if (!this->head) roll_stats();
+    head = next_upage(head);
+    if (!head) roll_stats();
 
     /* If we hit the end of the block, we're done */
-    if (is_aligned(this->head, this->nand.log2_ppb())) {
+    if (is_aligned(head, log2_ppb)) {
       /* Make sure we don't chase over the tail */
-      if (align_eq(this->head, this->tail, this->nand.log2_ppb()))
-        this->tail = next_block(this->nand, this->tail >> this->nand.log2_ppb())
-                     << this->nand.log2_ppb();
+      if (align_eq(head, tail, log2_ppb)) tail = next_block(nand, tail >> log2_ppb) << log2_ppb;
       break;
     }
-  } while (!cp_free(this->head));
+  } while (!cp_free(head));
 
-  return 0;
+  return error_t::none;
 }
 
-int Journal::resume(error_t *err) noexcept {
+Outcome<void> JournalBase::resume() noexcept {
+  const auto page_buf = this->page_buf();
+
   block_t first, last;
   page_t last_group;
 
   /* Find the first checkpoint-containing block */
-  if (find_checkblock(0, &first, err) < 0) {
-    reset_journal();
-    return -1;
+  {
+    auto res = find_checkblock(0);
+    if (res.has_error()) {
+      reset_journal();
+      return res.error();
+    }
+    first = res.value();
   }
 
   /* Find the last checkpoint-containing block in this epoch */
-  this->epoch = hdr_get_epoch(hdr_cbuf_t(this->page_buf));
+  epoch = hdr_get_epoch(hdr_cbuf_t(page_buf));
   last = find_last_checkblock(first);
 
   /* Find the last programmed checkpoint group in the block */
@@ -338,299 +315,297 @@ int Journal::resume(error_t *err) noexcept {
   /* Perform a linear scan to find the last good checkpoint (and
    * therefore the root).
    */
-  if (find_root(last_group, err) < 0) {
-    reset_journal();
-    return -1;
+  {
+    auto res = find_root(last_group);
+    if (res.has_error()) {
+      reset_journal();
+      return res.error();
+    }
   }
 
   /* Restore settings from checkpoint */
-  this->tail = hdr_get_tail(hdr_cbuf_t(this->page_buf));
-  this->bb_current = hdr_get_bb_current(hdr_cbuf_t(this->page_buf));
-  this->bb_last = hdr_get_bb_last(hdr_cbuf_t(this->page_buf));
-  hdr_clear_user(this->page_buf, this->nand.log2_page_size());
+  tail = hdr_get_tail(hdr_cbuf_t(page_buf));
+  bb_current = hdr_get_bb_current(hdr_cbuf_t(page_buf));
+  bb_last = hdr_get_bb_last(hdr_cbuf_t(page_buf));
+  hdr_clear_user(page_buf, nand.log2_page_size());
 
   /* Perform another linear scan to find the next free user page */
-  if (find_head(last_group, err) < 0) {
-    reset_journal();
-    return -1;
+  {
+    auto res = find_head(last_group);
+    if (res.has_error()) {
+      reset_journal();
+      return res.error();
+    }
   }
 
-  this->flags = 0;
-  this->tail_sync = this->tail;
+  flags = 0;
+  tail_sync = tail;
 
   clear_recovery();
-  return 0;
+  return error_t::none;
 }
 
 /**************************************************************************
  * Public interface
  */
 
-page_t Journal::capacity() const noexcept {
-  const block_t max_bad = this->bb_last > this->bb_current ? this->bb_last : this->bb_current;
-  const block_t good_blocks = this->nand.num_blocks() - max_bad - 1;
-  const int log2_cpb = this->nand.log2_ppb() - this->log2_ppc;
+std::size_t JournalBase::capacity() const noexcept {
+  const block_t max_bad = bb_last > bb_current ? bb_last : bb_current;
+  const block_t good_blocks = nand.num_blocks() - max_bad - 1;
+  const int log2_cpb = nand.log2_ppb() - config.log2_ppc;
   const page_t good_cps = good_blocks << log2_cpb;
 
   /* Good checkpoints * (checkpoint period - 1) */
-  return (good_cps << this->log2_ppc) - good_cps;
+  return (good_cps << config.log2_ppc) - good_cps;
 }
 
-page_t Journal::size() const noexcept {
+std::size_t JournalBase::size() const noexcept {
   /* Find the number of raw pages, and the number of checkpoints
    * between the head and the tail. The difference between the two
    * is the number of user pages (upper limit).
    */
-  page_t num_pages = this->head;
-  page_t num_cps = this->head >> this->log2_ppc;
+  const std::uint8_t log2_ppc = config.log2_ppc;
 
-  if (this->head < this->tail_sync) {
-    const page_t total_pages = this->nand.num_blocks() << this->nand.log2_ppb();
+  std::size_t num_pages = head;
+  std::size_t num_cps = head >> log2_ppc;
+
+  if (head < tail_sync) {
+    const std::size_t total_pages = nand.num_blocks() << config.nand.log2_ppb;
 
     num_pages += total_pages;
-    num_cps += total_pages >> this->log2_ppc;
+    num_cps += total_pages >> log2_ppc;
   }
 
-  num_pages -= this->tail_sync;
-  num_cps -= this->tail_sync >> this->log2_ppc;
+  num_pages -= tail_sync;
+  num_cps -= tail_sync >> log2_ppc;
 
   return num_pages - num_cps;
 }
 
-int Journal::read_meta(page_t p, meta_buf_t buf, error_t *err) noexcept {
+Outcome<void> JournalBase::read_meta(page_t p, std::byte *buf) noexcept {
   /* Offset of metadata within the metadata page */
-  const page_t ppc_mask = (1 << this->log2_ppc) - 1;
+  const page_t ppc_mask = (1u << config.log2_ppc) - 1;
   const size_t offset = hdr_user_offset(p & ppc_mask);
-  meta_cbuf_t meta_buf(page_buf.subspan(offset, meta_size));
+  byte_buf_t out_buf(buf, config.meta_size);
 
   /* Special case: buffered metadata */
-  if (align_eq(p, this->head, this->log2_ppc)) {
-    memcpy(buf.data(), meta_buf.data(), meta_buf.size_bytes());
-    return 0;
+  if (align_eq(p, head, config.log2_ppc)) {
+    memcpy(out_buf.data(), page_buf_ptr + offset, out_buf.size_bytes());
+    return error_t::none;
   }
 
   /* Special case: incomplete metadata dumped at start of
    * recovery.
    */
-  if ((this->recover_meta != DHARA_PAGE_NONE) && align_eq(p, this->recover_root, this->log2_ppc)) {
-    auto res = this->nand.read(this->recover_meta, offset, buf);
-    if(res.has_error()) *err = res.error();
-    return res.has_error() ? -1 : 0;
+  if ((recover_meta != page_none) && align_eq(p, recover_root, config.log2_ppc)) {
+    return nand.read(recover_meta, offset, out_buf);
   }
 
   /* General case: fetch from metadata page for checkpoint group */
-  auto res = this->nand.read(p | ppc_mask, offset, buf);
-  if(res.has_error()) *err = res.error();
-  return res.has_error() ? -1 : 0;
+  return nand.read(p | ppc_mask, offset, out_buf);
 }
 
-page_t Journal::peek() noexcept {
-  if (this->head == this->tail) return DHARA_PAGE_NONE;
+page_t JournalBase::peek() noexcept {
+  if (head == tail) return page_none;
 
-  if (is_aligned(this->tail, this->nand.log2_ppb())) {
-    block_t blk = this->tail >> this->nand.log2_ppb();
+  if (is_aligned(tail, nand.log2_ppb())) {
+    block_t blk = tail >> nand.log2_ppb();
     int i;
 
-    for (i = 0; i < DHARA_MAX_RETRIES; i++) {
-      if ((blk == (this->head >> this->nand.log2_ppb())) || !this->nand.is_bad(blk)) {
-        this->tail = blk << this->nand.log2_ppb();
+    for (i = 0; i < config.max_retries; i++) {
+      if ((blk == (head >> nand.log2_ppb())) || !nand.is_bad(blk)) {
+        tail = blk << nand.log2_ppb();
 
-        if (this->tail == this->head) this->root_ = DHARA_PAGE_NONE;
+        if (tail == head) root_ = page_none;
 
-        return this->tail;
+        return tail;
       }
 
-      blk = next_block(this->nand, blk);
+      blk = next_block(nand, blk);
     }
   }
 
-  return this->tail;
+  return tail;
 }
 
-void Journal::dequeue() noexcept {
-  if (this->head == this->tail) return;
+void JournalBase::dequeue() noexcept {
+  if (head == tail) return;
 
-  this->tail = next_upage(this->tail);
+  tail = next_upage(tail);
 
   /* If the journal is clean at the time of dequeue, then this
    * data was always obsolete, and can be reused immediately.
    */
-  if (!(this->flags & (DHARA_JOURNAL_F_DIRTY | DHARA_JOURNAL_F_RECOVERY)))
-    this->tail_sync = this->tail;
+  if (!(flags[int(Flag::dirty)] || flags[int(Flag::recovery)])) tail_sync = tail;
 
-  if (this->head == this->tail) this->root_ = DHARA_PAGE_NONE;
+  if (head == tail) root_ = page_none;
 }
 
-void Journal::clear() noexcept {
-  this->tail = this->head;
-  this->root_ = DHARA_PAGE_NONE;
-  this->flags |= DHARA_JOURNAL_F_DIRTY;
+void JournalBase::clear() noexcept {
+  tail = head;
+  root_ = page_none;
+  flags[int(Flag::dirty)] = true;
 
-  hdr_clear_user(this->page_buf, this->nand.log2_page_size());
+  hdr_clear_user(page_buf(), nand.log2_page_size());
 }
 
-int Journal::skip_block(error_t *err) noexcept {
-  const block_t next = next_block(this->nand, this->head >> this->nand.log2_ppb());
+Outcome<void> JournalBase::skip_block() noexcept {
+  const std::uint8_t log2_ppb = config.nand.log2_ppb;
+  const block_t next = next_block(nand, head >> log2_ppb);
 
   /* We can't roll onto the same block as the tail */
-  if ((this->tail_sync >> this->nand.log2_ppb()) == next) {
-    set_error(err, error_t::journal_full);
-    return -1;
+  if ((tail_sync >> log2_ppb) == next) {
+    return error_t::journal_full;
   }
 
-  this->head = next << this->nand.log2_ppb();
-  if (!this->head) roll_stats();
+  head = next << log2_ppb;
+  if (!head) roll_stats();
 
-  return 0;
+  return error_t::none;
 }
 
 /* Make sure the head pointer is on a ready-to-program page. */
-int Journal::prepare_head(error_t *err) noexcept {
-  const page_t next = next_upage(this->head);
+Outcome<void> JournalBase::prepare_head() noexcept {
+  const std::uint8_t log2_ppb = config.nand.log2_ppb;
+  const page_t next = next_upage(head);
   int i;
 
   /* We can't write if doing so would cause the head pointer to
    * roll onto the same block as the last-synced tail.
    */
-  if (align_eq(next, this->tail_sync, this->nand.log2_ppb()) &&
-      !align_eq(next, this->head, this->nand.log2_ppb())) {
-    set_error(err, error_t::journal_full);
-    return -1;
+  if (align_eq(next, tail_sync, log2_ppb) && !align_eq(next, head, log2_ppb)) {
+    return error_t::journal_full;
   }
 
-  this->flags |= DHARA_JOURNAL_F_DIRTY;
-  if (!is_aligned(this->head, this->nand.log2_ppb())) return 0;
+  flags[int(Flag::dirty)] = true;
+  if (!is_aligned(head, log2_ppb)) return error_t::none;
 
-  for (i = 0; i < DHARA_MAX_RETRIES; i++) {
-    const block_t blk = this->head >> this->nand.log2_ppb();
+  for (i = 0; i < config.max_retries; i++) {
+    const block_t blk = head >> log2_ppb;
 
-    if (!this->nand.is_bad(blk)) {
-      auto res = this->nand.erase(blk);
-      if(res.has_error()) *err = res.error();
-      return res.has_error() ? -1 : 0;
+    if (!nand.is_bad(blk)) {
+      return nand.erase(blk);
     }
 
-    this->bb_current++;
-    if (skip_block(err) < 0) return -1;
+    bb_current++;
+    DHARA_TRY(skip_block());
   }
 
-  set_error(err, error_t::too_bad);
-  return -1;
+  return error_t::too_bad;
 }
 
-void Journal::restart_recovery(page_t old_head) noexcept {
+void JournalBase::restart_recovery(page_t old_head) noexcept {
+  const std::uint8_t log2_ppb = config.nand.log2_ppb;
   /* Mark the current head bad immediately, unless we're also
    * using it to hold our dumped metadata (it will then be marked
    * bad at the end of recovery).
    */
-  if ((this->recover_meta == DHARA_PAGE_NONE) ||
-      !align_eq(this->recover_meta, old_head, this->nand.log2_ppb()))
-    this->nand.mark_bad(old_head >> this->nand.log2_ppb());
+  if ((recover_meta == page_none) || !align_eq(recover_meta, old_head, log2_ppb))
+    nand.mark_bad(old_head >> log2_ppb);
   else
-    this->flags |= DHARA_JOURNAL_F_BAD_META;
+    flags[int(Flag::bad_meta)] = true;
 
   /* Start recovery again. Reset the source enumeration to
    * the start of the original bad block, and reset the
    * destination enumeration to the newly found good
    * block.
    */
-  this->flags &= ~DHARA_JOURNAL_F_ENUM_DONE;
-  this->recover_next = this->recover_root & ~((1 << this->nand.log2_ppb()) - 1);
+  flags[int(Flag::enum_done)] = false;
+  recover_next = recover_root & ~((1u << log2_ppb) - 1u);
 
-  this->root_ = this->recover_root;
+  root_ = recover_root;
 }
 
-int Journal::dump_meta(error_t *err) noexcept {
-  const std::uint8_t log2_page_size = this->nand.log2_page_size();
-  const std::uint8_t log2_ppb = this->nand.log2_ppb();
+Outcome<void> JournalBase::dump_meta() noexcept {
+  const std::uint8_t log2_page_size = config.nand.log2_page_size;
+  const std::uint8_t log2_ppb = config.nand.log2_ppb;
+  const auto page_buf = this->page_buf();
   /* We've just begun recovery on a new erasable block, but we
    * have buffered metadata from the failed block.
    */
-  for (int i = 0; i < DHARA_MAX_RETRIES; i++) {
-    error_t my_err;
-
-    /* Try to dump metadata on this page */
-    if (!(prepare_head(&my_err) || this->nand.prog(this->head, page_buf).handle_legacy_err(&my_err))) {
-      this->recover_meta = this->head;
-      this->head = next_upage(this->head);
-      if (!this->head) roll_stats();
-      hdr_clear_user(this->page_buf, log2_page_size);
-      return 0;
-    }
+  for (int i = 0; i < config.max_retries; i++) {
+    auto res = [&]() -> Outcome<void> {
+      /* Try to dump metadata on this page */
+      DHARA_TRY(prepare_head());
+      DHARA_TRY(nand.prog(head, page_buf_ptr));
+      recover_meta = head;
+      head = next_upage(head);
+      if (!head) roll_stats();
+      hdr_clear_user(page_buf, log2_page_size);
+      return error_t::none;
+    }();
 
     /* Report fatal errors */
-    if (my_err != error_t::bad_block) {
-      set_error(err, my_err);
-      return -1;
+    if (res.has_error() && res.error() != error_t::bad_block) {
+      return res;
     }
 
-    this->bb_current++;
-    this->nand.mark_bad(this->head >> log2_ppb);
+    bb_current++;
+    nand.mark_bad(head >> log2_ppb);
 
-    if (skip_block(err) < 0) return -1;
+    DHARA_TRY(skip_block());
   }
 
-  set_error(err, error_t::too_bad);
-  return -1;
+  return error_t::too_bad;
 }
 
-int Journal::recover_from(error_t write_err, error_t *err) noexcept {
-  const page_t old_head = this->head;
+Outcome<void> JournalBase::recover_from(error_t write_err) noexcept {
+  const std::uint8_t log2_ppb = config.nand.log2_ppb;
+
+  const page_t old_head = head;
 
   if (write_err != error_t::bad_block) {
-    set_error(err, write_err);
-    return -1;
+    return write_err;
   }
 
   /* Advance to the next free page */
-  this->bb_current++;
-  if (skip_block(err) < 0) return -1;
+  bb_current++;
+  DHARA_TRY(skip_block());
 
   /* Are we already in the middle of a recovery? */
   if (in_recovery()) {
     restart_recovery(old_head);
-    set_error(err, error_t::recover);
-    return -1;
+    return error_t::recover;
   }
 
   /* Were we block aligned? No recovery required! */
-  if (is_aligned(old_head, this->nand.log2_ppb())) {
-    this->nand.mark_bad(old_head >> this->nand.log2_ppb());
-    return 0;
+  if (is_aligned(old_head, log2_ppb)) {
+    nand.mark_bad(old_head >> log2_ppb);
+    return error_t::none;
   }
 
-  this->recover_root = this->root_;
-  this->recover_next = this->recover_root & ~((1 << this->nand.log2_ppb()) - 1);
+  recover_root = root_;
+  recover_next = recover_root & ~((1u << log2_ppb) - 1u);
 
   /* Are we holding buffered metadata? Dump it first. */
-  if (!is_aligned(old_head, this->log2_ppc) && dump_meta(err) < 0) return -1;
+  if (!is_aligned(old_head, config.log2_ppc)) {
+    DHARA_TRY(dump_meta());
+  }
 
-  this->flags |= DHARA_JOURNAL_F_RECOVERY;
-  set_error(err, error_t::recover);
-  return -1;
+  flags[int(Flag::recovery)] = true;
+  return error_t::recover;
 }
 
-void Journal::finish_recovery() noexcept {
+void JournalBase::finish_recovery() noexcept {
   /* We just recovered the last page. Mark the recovered
    * block as bad.
    */
-  this->nand.mark_bad(this->recover_root >> this->nand.log2_ppb());
+  nand.mark_bad(recover_root >> config.nand.log2_ppb);
 
   /* If we had to dump metadata, and the page on which we
    * did this also went bad, mark it bad too.
    */
-  if (this->flags & DHARA_JOURNAL_F_BAD_META)
-    this->nand.mark_bad(this->recover_meta >> this->nand.log2_ppb());
+  if (flags[int(Flag::bad_meta)]) nand.mark_bad(recover_meta >> config.nand.log2_ppb);
 
   /* Was the tail on this page? Skip it forward */
   clear_recovery();
 }
 
-int Journal::push_meta(const std::byte *meta, error_t *err) noexcept {
-  const page_t old_head = this->head;
-  error_t my_err;
-  const size_t offset = hdr_user_offset(this->head & ((1 << this->log2_ppc) - 1));
-  meta_buf_t meta_buf(page_buf.subspan(offset, meta_size));
+Outcome<void> JournalBase::push_meta(const std::byte *meta) noexcept {
+  const page_t old_head = head;
+  const size_t offset = hdr_user_offset(head & ((1u << config.log2_ppc) - 1u));
+  const auto page_buf = this->page_buf();
+  const byte_buf_t meta_buf(page_buf.subspan(offset, config.meta_size));
 
   /* We've just written a user page. Add the metadata to the
    * buffer.
@@ -641,81 +616,87 @@ int Journal::push_meta(const std::byte *meta, error_t *err) noexcept {
     memset(meta_buf.data(), 0xff, meta_buf.size_bytes());
 
   /* Unless we've filled the buffer, don't do any IO */
-  if (!is_aligned(this->head + 2, this->log2_ppc)) {
-    this->root_ = this->head;
-    this->head++;
-    return 0;
+  if (!is_aligned(head + 2, config.log2_ppc)) {
+    root_ = head;
+    head++;
+    return error_t::none;
   }
 
   /* We don't need to check for immediate recover, because that'll
    * never happen -- we're not block-aligned.
    */
-  hdr_buf_t hdr_buf(this->page_buf);
+  hdr_buf_t hdr_buf(page_buf);
   hdr_put_magic(hdr_buf);
-  hdr_set_epoch(hdr_buf, this->epoch);
-  hdr_set_tail(hdr_buf, this->tail);
-  hdr_set_bb_current(hdr_buf, this->bb_current);
-  hdr_set_bb_last(hdr_buf, this->bb_last);
+  hdr_set_epoch(hdr_buf, epoch);
+  hdr_set_tail(hdr_buf, tail);
+  hdr_set_bb_current(hdr_buf, bb_current);
+  hdr_set_bb_last(hdr_buf, bb_last);
 
-  if (this->nand.prog(this->head + 1, this->page_buf).handle_legacy_err(&my_err) < 0)
-    return recover_from(my_err, err);
+  {
+    auto res = nand.prog(head + 1, page_buf.data());
+    if (res.has_error()) return recover_from(res.error());
+  }
+  flags[int(Flag::dirty)] = false;
 
-  this->flags &= ~DHARA_JOURNAL_F_DIRTY;
+  root_ = old_head;
+  head = next_upage(head);
 
-  this->root_ = old_head;
-  this->head = next_upage(this->head);
+  if (!head) roll_stats();
 
-  if (!this->head) roll_stats();
+  if (flags[int(Flag::enum_done)]) finish_recovery();
 
-  if (this->flags & DHARA_JOURNAL_F_ENUM_DONE) finish_recovery();
+  if (!flags[int(Flag::recovery)]) tail_sync = tail;
 
-  if (!(this->flags & DHARA_JOURNAL_F_RECOVERY)) this->tail_sync = this->tail;
-
-  return 0;
+  return error_t::none;
 }
 
-int Journal::enqueue(const std::byte *data, const std::byte *meta, error_t *err) noexcept {
-  error_t my_err;
-  int i;
+Outcome<void> JournalBase::enqueue(const std::byte *data, const std::byte *meta) noexcept {
+  for (int i = 0; i < config.max_retries; i++) {
+    auto res = [&]() -> Outcome<void> {
+      DHARA_TRY(prepare_head());
+      if (data) {
+        DHARA_TRY(nand.prog(head, data));
+      }
+      return error_t::none;
+    }();
+    if (res.has_value()) {
+      return push_meta(meta);
+    }
 
-  for (i = 0; i < DHARA_MAX_RETRIES; i++) {
-    if (!(prepare_head(&my_err) ||
-          (data && this->nand.prog(this->head, {data, this->nand.page_size()}).handle_legacy_err(&my_err))))
-      return push_meta(meta, err);
-
-    if (recover_from(my_err, err) < 0) return -1;
+    DHARA_TRY(recover_from(res.error()));
   }
 
-  set_error(err, error_t::too_bad);
-  return -1;
+  return error_t::too_bad;
 }
 
-int Journal::copy(page_t p, const std::byte *meta, error_t *err) noexcept {
-  error_t my_err;
-  int i;
+Outcome<void> JournalBase::copy(page_t p, const std::byte *meta) noexcept {
+  for (int i = 0; i < config.max_retries; i++) {
+    auto res = [&]() -> Outcome<void> {
+      DHARA_TRY(prepare_head());
+      DHARA_TRY(nand.copy(p, head));
+      return error_t::none;
+    }();
+    if (res.has_value()) {
+      return push_meta(meta);
+    }
 
-  for (i = 0; i < DHARA_MAX_RETRIES; i++) {
-    if (!(prepare_head(&my_err) || this->nand.copy(p, this->head).handle_legacy_err(&my_err)))
-      return push_meta(meta, err);
-
-    if (recover_from(my_err, err) < 0) return -1;
+    DHARA_TRY(recover_from(res.error()));
   }
 
-  set_error(err, error_t::too_bad);
-  return -1;
+  return error_t::too_bad;
 }
 
-page_t Journal::next_recoverable() noexcept {
-  const page_t n = this->recover_next;
+page_t JournalBase::next_recoverable() noexcept {
+  const page_t n = recover_next;
 
-  if (!in_recovery()) return DHARA_PAGE_NONE;
+  if (!in_recovery()) return page_none;
 
-  if (this->flags & DHARA_JOURNAL_F_ENUM_DONE) return DHARA_PAGE_NONE;
+  if (flags[int(Flag::enum_done)]) return page_none;
 
-  if (this->recover_next == this->recover_root)
-    this->flags |= DHARA_JOURNAL_F_ENUM_DONE;
+  if (recover_next == recover_root)
+    flags[int(Flag::enum_done)] = true;
   else
-    this->recover_next = next_upage(this->recover_next);
+    recover_next = next_upage(recover_next);
 
   return n;
 }

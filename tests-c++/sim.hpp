@@ -92,7 +92,7 @@ class SimNand : public NandBase {
    * Pages will be programmed sequentially within a block, and will not be
    * reprogrammed.
    */
-  virtual Outcome<void> prog(page_t p, std::span<const std::byte> data) noexcept override;
+  virtual Outcome<void> prog(page_t p, const std::byte *data) noexcept override;
 
   /* Check that the given page is erased */
   virtual bool is_free(page_t p) const noexcept override;
@@ -169,34 +169,20 @@ class SimNand : public NandBase {
   mutable sim_stats stats;
 };
 
-template <std::uint8_t log2_page_size__ = 9u, std::uint8_t log2_ppb__ = 3u,
+template <std::uint8_t log2_page_size_ = 9u, std::uint8_t log2_ppb_ = 3u,
           std::size_t num_blocks__ = 113u>
-class StaticSimNand final : public SimNand {
+class StaticSimNand final : public Nand<log2_page_size_, log2_ppb_, SimNand> {
+  using base_t = Nand<log2_page_size_, log2_ppb_, SimNand>;
  public:
-  static constexpr std::uint8_t log2_page_size_ = log2_page_size__;
-  static constexpr std::uint8_t log2_ppb_ = log2_ppb__;
   static constexpr std::size_t num_blocks_ = num_blocks__;
-  static constexpr std::uint8_t log2_block_size_ = log2_page_size_ + log2_ppb_;
-  static constexpr std::size_t page_size_ = 1u << log2_page_size_;
-  static constexpr std::size_t pages_per_block_ = 1u << log2_ppb_;
-  static constexpr std::size_t block_size_ = 1u << log2_block_size_;
-  static constexpr std::size_t mem_size_ = num_blocks_ * block_size_;
+  static constexpr std::size_t mem_size_ = num_blocks_ << base_t::config.log2_block_size();
 
-  /* Base-2 logarithm of the page size. If your device supports
-   * partial programming, you may want to subdivide the actual
-   * pages into separate ECC-correctable regions and present those
-   * as pages.
-   */
-  [[nodiscard]] virtual constexpr std::uint8_t log2_page_size() const noexcept final {
-    return log2_page_size_;
+  [[nodiscard]] virtual constexpr std::size_t num_blocks() const noexcept {
+    return num_blocks_;
   }
 
-  /* Base-2 logarithm of the number of pages within an eraseblock */
-  [[nodiscard]] virtual constexpr std::uint8_t log2_ppb() const noexcept final { return log2_ppb_; }
-
-  /* Total number of eraseblocks */
-  [[nodiscard]] virtual constexpr std::size_t num_blocks() const noexcept final {
-    return num_blocks_;
+  [[nodiscard]] virtual constexpr std::size_t mem_size() const noexcept {
+    return mem_size_;
   }
 
  protected:
@@ -215,7 +201,7 @@ class StaticSimNand final : public SimNand {
  private:
   std::array<block_status, num_blocks_> blocks_;
   std::array<std::byte, mem_size_> pages_;
-  std::array<std::byte, page_size_> page_buf_;
+  std::array<std::byte, base_t::config.page_size()> page_buf_;
 };
 
 }  // namespace dhara_tests
