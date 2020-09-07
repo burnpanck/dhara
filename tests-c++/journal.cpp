@@ -46,9 +46,7 @@ void suspend_resume(TestJournalBase &j) {
 StaticSimNand sim_nand;
 
 int main() {
-  constexpr size_t page_size = sim_nand.config.page_size();
-  std::array<std::byte, page_size> page_buf;
-  TestJournal journal(sim_nand, std::span(page_buf));
+  TestJournal journal(sim_nand);
 
   sim_nand.reset();
   sim_nand.inject_bad(20);

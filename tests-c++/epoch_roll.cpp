@@ -14,58 +14,47 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include "dhara/map.h"
-#include "sim.h"
-#include "util.h"
-#include <assert.h>
-#include <stdio.h>
+#include "sim.hpp"
+#include "util.hpp"
+#include "mtutil.hpp"
+
+#include "dhara/map.hpp"
+
+#include <cassert>
+#include <cstdio>
 
 #define GC_RATIO 4
 
-static void mt_write(struct dhara_map *m, dhara_sector_t s, int seed) {
-  const size_t page_size = 1 << m->journal.nand->log2_page_size;
-  uint8_t buf[page_size];
-  dhara_error_t err;
+using namespace std;
+using namespace dhara;
+using namespace dhara_tests;
 
-  seq_gen(seed, buf, sizeof(buf));
-  if (dhara_map_write(m, s, buf, &err) < 0) dabort("map_write", err);
-}
-
-static void mt_assert(struct dhara_map *m, dhara_sector_t s, int seed) {
-  const size_t page_size = 1 << m->journal.nand->log2_page_size;
-  uint8_t buf[page_size];
-  dhara_error_t err;
-
-  if (dhara_map_read(m, s, buf, &err) < 0) dabort("map_read", err);
-
-  seq_assert(seed, buf, sizeof(buf));
-}
+static StaticSimNand sim_nand;
 
 int main(void) {
-  const size_t page_size = 1 << sim_nand.log2_page_size;
-  struct dhara_map map;
-  uint8_t page_buf[page_size];
+  TestMap<sim_nand.config.log2_page_size, sim_nand.config.log2_ppb> map(sim_nand);
+
   int write_seed = 0;
   int i;
 
-  sim_reset();
-  dhara_map_init(&map, &sim_nand, page_buf, GC_RATIO);
-  dhara_map_resume(&map, NULL);
-  printf("resumed, head = %d\n", map.journal.head);
+  sim_nand.reset();
+  map.init();
+  map.resume();
+  printf("resumed, head = %d\n", map.get_head());
 
   /* Write pages until we have just barely wrapped around, but not
    * yet hit a checkpoint.
    */
-  for (i = 0; i < 200; i++) mt_write(&map, i, write_seed++);
-  printf("written a little, head = %d\n", map.journal.head);
+  for (i = 0; i < 200; i++) map.write(i, write_seed++);
+  printf("written a little, head = %d\n", map.get_head());
 
-  for (i = 0; i < 200; i++) mt_write(&map, i, write_seed++);
-  printf("written a little, head = %d\n", map.journal.head);
-  for (i = 0; i < 200; i++) mt_write(&map, i, write_seed++);
-  printf("written a little, head = %d\n", map.journal.head);
-  for (i = 0; i < 79; i++) mt_write(&map, i, write_seed++);
-  printf("written a little, head = %d\n", map.journal.head);
-  assert(map.journal.head == 1); /* Required for this test */
+  for (i = 0; i < 200; i++) map.write(i, write_seed++);
+  printf("written a little, head = %d\n", map.get_head());
+  for (i = 0; i < 200; i++) map.write(i, write_seed++);
+  printf("written a little, head = %d\n", map.get_head());
+  for (i = 0; i < 79; i++) map.write(i, write_seed++);
+  printf("written a little, head = %d\n", map.get_head());
+  assert(map.get_head() == 1); /* Required for this test */
 
   /* Now, see what happens on resume if we don't sync.
    *
@@ -76,27 +65,27 @@ int main(void) {
    * are potentially lost, because they will be wrongly identified
    * as older than the pages coming physically later in the chip.
    */
-  printf("before resume: head = %d, tail = %d, epoch = %d\n", map.journal.head, map.journal.tail,
-         map.journal.epoch);
-  dhara_map_resume(&map, NULL);
-  printf("resumed, head = %d, tail = %d, epoch = %d\n", map.journal.head, map.journal.tail,
-         map.journal.epoch);
+  printf("before resume: head = %d, tail = %d, epoch = %d\n", map.get_head(), map.get_tail(),
+         map.get_epoch());
+  map.resume();
+  printf("resumed, head = %d, tail = %d, epoch = %d\n", map.get_head(), map.get_tail(),
+         map.get_epoch());
 
-  for (i = 0; i < 2; i++) mt_write(&map, i, i + 10000);
-  printf("written new data, head = %d\n", map.journal.head);
-  dhara_map_sync(&map, NULL);
+  for (i = 0; i < 2; i++) map.write(i, i + 10000);
+  printf("written new data, head = %d\n", map.get_head());
+  map.sync();
 
   /* Try another resume */
   printf("--------------------------------------------------------\n");
-  printf("before resume: head = %d, tail = %d, epoch = %d\n", map.journal.head, map.journal.tail,
-         map.journal.epoch);
-  mt_assert(&map, 0, 10000);
-  mt_assert(&map, 1, 10001);
-  dhara_map_resume(&map, NULL);
-  printf("resumed, head = %d, tail = %d, epoch = %d\n", map.journal.head, map.journal.tail,
-         map.journal.epoch);
-  mt_assert(&map, 0, 10000);
-  mt_assert(&map, 1, 10001);
+  printf("before resume: head = %d, tail = %d, epoch = %d\n", map.get_head(), map.get_tail(),
+         map.get_epoch());
+  map.do_assert(0, 10000);
+  map.do_assert(1, 10001);
+  map.resume();
+  printf("resumed, head = %d, tail = %d, epoch = %d\n", map.get_head(), map.get_tail(),
+         map.get_epoch());
+  map.do_assert(0, 10000);
+  map.do_assert(1, 10001);
 
   return 0;
 }

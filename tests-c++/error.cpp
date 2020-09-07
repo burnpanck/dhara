@@ -14,18 +14,20 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include "dhara/error.h"
+#include "dhara/error.hpp"
 
-#include <assert.h>
-#include <stdio.h>
+#include <cassert>
+#include <cstdio>
+
+using namespace std;
+using namespace dhara;
 
 int main(void) {
-  dhara_error_t err;
+  for (int ierr = int(error_t::none); ierr < int(error_t::max); ierr++) {
+    auto err = static_cast<error_t>(ierr);
+    const char *msg = strerror(err);
 
-  for (err = DHARA_E_NONE; err < DHARA_E_MAX; err++) {
-    const char *msg = dhara_strerror(err);
-
-    assert(msg != NULL);
+    assert(msg != nullptr);
     printf("%4d: %s\n", err, msg);
   }
 

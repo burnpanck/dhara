@@ -16,28 +16,32 @@
 
 #include "jtutil.hpp"
 
-#include "dhara/bytes.h"
-#include "dhara/journal.h"
-#include "sim.h"
-#include "util.h"
-#include <assert.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "dhara/bytes.hpp"
+#include "dhara/journal.hpp"
+#include "sim.hpp"
+#include "util.hpp"
+#include <cassert>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+using namespace std;
+using namespace dhara;
+using namespace dhara_tests;
+
+StaticSimNand sim_nand;
 
 int main(void) {
-  struct dhara_journal journal;
-  const size_t page_size = 1 << sim_nand.log2_page_size;
-  uint8_t page_buf[page_size];
+  TestJournal journal(sim_nand);
+
   int rep;
 
-  sim_reset();
-  sim_inject_bad(10);
-  sim_inject_failed(10);
+  sim_nand.reset();
+  sim_nand.inject_bad(10);
+  sim_nand.inject_failed(10);
 
   printf("Journal init\n");
-  dhara_journal_init(&journal, &sim_nand, page_buf);
-  printf("    capacity: %d\n", dhara_journal_capacity(&journal));
+  printf("    capacity: %d\n", journal.capacity());
   printf("\n");
 
   for (rep = 0; rep < 5; rep++) {
@@ -46,19 +50,19 @@ int main(void) {
     printf("Rep: %d\n", rep);
 
     printf("    enqueue until error...\n");
-    count = jt_enqueue_sequence(&journal, 0, -1);
+    count = journal.enqueue_sequence(0, -1);
     printf("    enqueue count: %d\n", count);
-    printf("    size: %d\n", dhara_journal_size(&journal));
+    printf("    size: %d\n", journal.size());
 
     printf("    dequeue...\n");
-    jt_dequeue_sequence(&journal, 0, count);
-    printf("    size: %d\n", dhara_journal_size(&journal));
+    journal.dequeue_sequence(0, count);
+    printf("    size: %d\n", journal.size());
 
     /* Only way to recover space here... */
-    journal.tail_sync = journal.tail;
+    journal.do_tail_sync();
   }
 
   printf("\n");
-  sim_dump();
+  sim_nand.dump();
   return 0;
 }

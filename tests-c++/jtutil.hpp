@@ -46,23 +46,31 @@ class TestJournalBase : public JournalBase {
 
   void dump_info() const;
 
+  void do_tail_sync() {
+    // needed in jfill test; no clue what exactly it does, but it is supposed to free some space
+    tail_sync = tail;
+  }
+
  private:
   void check_upage(page_t p) const;
   void recover();
-  Outcome<void> enqueue(uint32_t id) ;
+  Outcome<void> enqueue(uint32_t id);
 };
 
 template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_, std::size_t meta_size_ = 132u,
-    std::size_t cookie_size_ = 4u, std::size_t max_retries_ = 8u>
-class TestJournal : public Journal<log2_page_size_,log2_ppb_,meta_size_,cookie_size_,max_retries_,TestJournalBase> {
-  using base_t = Journal<log2_page_size_,log2_ppb_,meta_size_,cookie_size_,max_retries_,TestJournalBase>;
+          std::size_t cookie_size_ = 4u, std::size_t max_retries_ = 8u>
+class TestJournal
+    : public Journal<log2_page_size_, log2_ppb_, meta_size_, cookie_size_, max_retries_,
+                     JournalSpec<meta_size_, cookie_size_, TestJournalBase>> {
+  using base_t = Journal<log2_page_size_, log2_ppb_, meta_size_, cookie_size_, max_retries_,
+                         JournalSpec<meta_size_, cookie_size_, TestJournalBase>>;
+
  public:
   using base_t::base_t;
 };
-template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_, typename NBase, std::size_t page_buf_size>
-TestJournal(Nand<log2_page_size_,log2_ppb_,NBase> &nand, std::span<std::byte,page_buf_size> page_buf)
--> TestJournal<log2_page_size_, log2_ppb_>;
-
+template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_, typename NBase>
+TestJournal(Nand<log2_page_size_, log2_ppb_, NBase> &nand)
+    -> TestJournal<log2_page_size_, log2_ppb_>;
 
 }  // namespace dhara_tests
 

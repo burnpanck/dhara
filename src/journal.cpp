@@ -534,9 +534,11 @@ Outcome<void> JournalBase::dump_meta() noexcept {
       hdr_clear_user(page_buf, log2_page_size);
       return error_t::none;
     }();
+    if(res.has_value())
+      return error_t::none;
 
     /* Report fatal errors */
-    if (res.has_error() && res.error() != error_t::bad_block) {
+    if (res.error() != error_t::bad_block) {
       return res;
     }
 

@@ -19,6 +19,8 @@
 
 #include <cstring>
 
+using namespace std;
+
 namespace dhara {
 
 static constexpr std::size_t radix_depth = sizeof(sector_t) << 3u;
@@ -267,7 +269,7 @@ Outcome<void> MapBase::prepare_write(sector_t dst, meta_span_t meta) noexcept {
 
 Outcome<void> MapBase::write(sector_t dst, const std::byte *data) noexcept {
   meta_buf_t meta;
-  for (;;) {
+  for (int i=0;;++i) {
     const sector_t old_count = count;
 
     DHARA_TRY(prepare_write(dst, meta));
