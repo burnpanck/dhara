@@ -39,13 +39,12 @@ class MapBase : public JournalSpec<132u, 4u> {
   using base_t = JournalSpec<132u, 4u>;
 
  protected:
-  static constexpr std::size_t meta_size = 132u;
-  static constexpr std::size_t cookie_size = 4u;
-
   using meta_buf_t = std::array<std::byte, meta_size>;
 
  public:
   static constexpr sector_t sector_none = static_cast<sector_t>(-1);
+
+  void init() noexcept { count = 0; }
 
   /* Recover stored state, if possible. If there is no valid stored state
    * on the chip, -1 is returned, and an empty map is initialized.
@@ -105,7 +104,7 @@ class MapBase : public JournalSpec<132u, 4u> {
    * expense of capacity. You should always initialize the same chip with
    * the same garbage collection ratio.
    */
-  MapBase(const JournalConfig &config, const MapConfig &map_config, NandBase &n,
+  MapBase(const MapConfig &map_config, const JournalConfig &config, NandBase &n,
           byte_buf_t page_buf) noexcept;
 
   /* Write data to a logical sector. */
@@ -117,8 +116,7 @@ class MapBase : public JournalSpec<132u, 4u> {
   Outcome<void> read(sector_t s, std::byte *data) noexcept;
 
  private:
-  Outcome<page_t> trace_path(sector_t target,
-                                      std::optional<meta_span_t> new_meta) noexcept;
+  Outcome<page_t> trace_path(sector_t target, std::optional<meta_span_t> new_meta) noexcept;
   Outcome<void> raw_gc(page_t src) noexcept;
   Outcome<void> pad_queue() noexcept;
   Outcome<void> try_recover(error_t cause) noexcept;
@@ -126,10 +124,22 @@ class MapBase : public JournalSpec<132u, 4u> {
   Outcome<void> prepare_write(sector_t dst, meta_span_t meta) noexcept;
   Outcome<void> try_delete(sector_t s) noexcept;
 
- private:
+ protected:
   const MapConfig &map_config;
 
   sector_count_t count;
+};
+
+template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_, std::size_t gc_ratio = 4u, std::size_t max_retries_ = 8u,
+          typename Base =
+              Journal<log2_page_size_, log2_ppb_, MapBase::meta_size, MapBase::cookie_size, max_retries_, MapBase>>
+class Map : public Base {
+  using base_t = Base;
+ public:
+  static constexpr MapConfig map_config = {.gc_ratio = gc_ratio};
+
+  template <typename NBase>
+  explicit Map(Nand<log2_page_size_,log2_ppb_,NBase> &n) noexcept : base_t(n, map_config) {}
 };
 
 }  // namespace dhara

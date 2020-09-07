@@ -51,7 +51,7 @@ void meta_set_alt(std::span<std::byte,132> meta, unsigned int level, page_t alt)
  * Public interface
  */
 
-MapBase::MapBase(const JournalConfig &config, const MapConfig &map_config, NandBase &n,
+MapBase::MapBase(const MapConfig &map_config, const JournalConfig &config, NandBase &n,
                  byte_buf_t page_buf) noexcept
     : base_t(config, n, page_buf), map_config(map_config) {}
 

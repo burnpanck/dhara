@@ -107,7 +107,7 @@ class NandBase {
   [[nodiscard]] virtual constexpr std::size_t page_size() const noexcept {
     return 1u << log2_page_size();
   }
-  [[nodiscard]] virtual constexpr std::size_t pages_per_block() const noexcept {
+  [[nodiscard]] virtual constexpr page_count_t pages_per_block() const noexcept {
     return 1u << log2_ppb();
   };
   [[nodiscard]] virtual constexpr std::size_t block_size() const noexcept {

@@ -283,6 +283,9 @@ template <std::size_t meta_size_ = 132u,
 class JournalSpec : public Base {
   using base_t = Base;
  public:
+  static constexpr std::size_t meta_size = meta_size_;
+  static constexpr std::size_t cookie_size = cookie_size_;
+
   using meta_span_t = std::span<std::byte, meta_size_>;
   using meta_cspan_t = std::span<const std::byte, meta_size_>;
   using cookie_span_t = std::span<std::byte, cookie_size_>;
@@ -378,9 +381,9 @@ class Journal : public Base {
   using cookie_span_t = typename base_t::cookie_span_t;
   using cookie_cspan_t = typename base_t::cookie_cspan_t;
 
-  template <typename NBase>
-  explicit Journal(Nand<log2_page_size_,log2_ppb_,NBase> &nand)
-       : base_t(config, nand, page_buf) {}
+  template <typename NBase, typename ...Args>
+  explicit Journal(Nand<log2_page_size_,log2_ppb_,NBase> &nand, Args &&...args)
+       : base_t(std::forward<Args>(args)..., config, nand, page_buf) {}
 
  protected:
   [[nodiscard]] page_span_t get_page_buf() noexcept {

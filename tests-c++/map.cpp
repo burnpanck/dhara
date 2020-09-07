@@ -31,6 +31,7 @@ using namespace std;
 using namespace dhara;
 using namespace dhara_tests;
 
+static StaticSimNand sim_nand;
 static sector_t sector_list[NUM_SECTORS];
 
 static void shuffle(int seed) {
@@ -48,133 +49,141 @@ static void shuffle(int seed) {
   }
 }
 
-static int check_recurse(MapBase &m, page_t parent, page_t page, sector_t id_expect,
-                         unsigned int depth) {
-  uint8_t meta[m.config.meta_size];
-  error_t err;
-  const page_t h_offset = m.head - m.tail;
-  const page_t p_offset = parent - m.tail;
-  const page_t offset = page - m.tail;
-  sector_t id;
-  int count = 1;
-  unsigned int i;
+class TestMapBase : public MapBase {
+  using base_t = MapBase;
 
-  if (page == MapBase::page_none) return 0;
+ public:
+  using base_t::base_t;
 
-  /* Make sure this is a valid journal user page, and one which is
-   * older than the page pointing to it.
-   */
-  assert(offset < p_offset);
-  assert(offset < h_offset);
-  assert((~page) & ((1u << m.config.log2_ppc) - 1u));
+  int check_recurse(page_t parent, page_t page, sector_t id_expect, unsigned int depth) {
+    meta_buf_t meta;
+    const page_t h_offset = head - tail;
+    const page_t p_offset = parent - tail;
+    const page_t offset = page - tail;
+    sector_t id;
+    int count = 1;
+    unsigned int i;
 
-  /* Fetch metadata */
-  if (m.read_meta(page, meta, &err) < 0) dabort("mt_check", err);
+    if (page == MapBase::page_none) return 0;
 
-  /* Check the first <depth> bits of the ID field */
-  id = dhara_r32(meta);
-  if (!depth) {
-    id_expect = id;
-  } else {
-    assert(!((id ^ id_expect) >> (32u - depth)));
+    /* Make sure this is a valid journal user page, and one which is
+     * older than the page pointing to it.
+     */
+    assert(offset < p_offset);
+    assert(offset < h_offset);
+    assert((~page) & ((1u << config.log2_ppc) - 1u));
+
+    /* Fetch metadata */
+    DHARA_TRY_ABORT(read_meta(page, meta));
+
+    /* Check the first <depth> bits of the ID field */
+    id = r32(std::span(meta).first<4>());
+    if (!depth) {
+      id_expect = id;
+    } else {
+      assert(!((id ^ id_expect) >> (32u - depth)));
+    }
+
+    /* Check all alt-pointers */
+    for (i = depth; i < 32u; i++) {
+      page_t child = r32(std::span<const std::byte, 4>(std::span(meta).subspan(4u + (i << 2u), 4)));
+
+      count += check_recurse(page, child, id ^ (1u << (31u - i)), i + 1u);
+    }
+
+    return count;
   }
 
-  /* Check all alt-pointers */
-  for (i = depth; i < 32u; i++) {
-    page_t child = dhara_r32(meta + (i << 2u) + 4u);
+  void check() {
+    int count;
 
-    count += check_recurse(m, page, child, id ^ (1u << (31u - i)), i + 1u);
+    sim_nand.freeze();
+    count = check_recurse(head, root(), 0, 0);
+    sim_nand.thaw();
+
+    assert(this->count == count);
   }
 
-  return count;
-}
+  void write(sector_t s, int seed) {
+    const size_t page_size = config.nand.page_size();
+    std::byte raw_buf[page_size];
+    std::span<std::byte> buf(raw_buf, page_size);
 
-static void mt_check(struct dhara_map *m) {
-  int count;
+    seq_gen(seed, buf);
+    DHARA_TRY_ABORT(base_t::write(s, buf.data()));
+  }
 
-  sim_freeze();
-  count = check_recurse(m, m->journal.head, dhara_journal_root(&m->journal), 0, 0);
-  sim_thaw();
+  void do_assert(sector_t s, int seed) {
+    const size_t page_size = config.nand.page_size();
+    std::byte raw_buf[page_size];
+    std::span<std::byte> buf(raw_buf, page_size);
 
-  assert(m->count == count);
-}
+    DHARA_TRY_ABORT(base_t::read(s, raw_buf));
 
-static void mt_write(struct dhara_map *m, sector_t s, int seed) {
-  const size_t page_size = 1 << m->journal.nand->log2_page_size();
-  uint8_t buf[page_size];
-  error_t err;
+    seq_assert(seed, buf);
+  }
 
-  seq_gen(seed, buf, sizeof(buf));
-  if (dhara_map_write(m, s, buf, &err) < 0) dabort("map_write", err);
-}
+  void trim(sector_t s) { DHARA_TRY_ABORT(base_t::trim(s)); }
 
-static void mt_assert(struct dhara_map *m, sector_t s, int seed) {
-  const size_t page_size = 1 << m->journal.nand->log2_page_size();
-  uint8_t buf[page_size];
-  error_t err;
+  void assert_blank(sector_t s) {
+    auto res = base_t::find(s);
+    assert(res.has_error());
+    assert(res.error() == error_t::not_found);
+  }
+};
 
-  if (dhara_map_read(m, s, buf, &err) < 0) dabort("map_read", err);
+template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_, std::size_t gc_ratio = 4u,
+          std::size_t max_retries_ = 8u>
+class TestMap : public Map<log2_page_size_, log2_ppb_, gc_ratio, max_retries_,
+                           Journal<log2_page_size_, log2_ppb_, MapBase::meta_size,
+                                   MapBase::cookie_size, max_retries_, TestMapBase>> {
+  using base_t = Map<log2_page_size_, log2_ppb_, gc_ratio, max_retries_,
+                     Journal<log2_page_size_, log2_ppb_, MapBase::meta_size, MapBase::cookie_size,
+                             max_retries_, TestMapBase>>;
 
-  seq_assert(seed, buf, sizeof(buf));
-}
-
-static void mt_trim(struct dhara_map *m, sector_t s) {
-  error_t err;
-
-  if (dhara_map_trim(m, s, &err) < 0) dabort("map_trim", err);
-}
-
-static void mt_assert_blank(struct dhara_map *m, sector_t s) {
-  error_t err;
-  page_t loc;
-  int r;
-
-  r = dhara_map_find(m, s, &loc, &err);
-  assert(r < 0);
-  assert(err == error_t::not_found);
-}
+ public:
+  using base_t::base_t;
+};
 
 int main(void) {
-  const size_t page_size = 1 << sim_nand.log2_page_size();
-  uint8_t page_buf[page_size];
-  struct dhara_map map;
+  TestMap<sim_nand.config.log2_page_size, sim_nand.config.log2_ppb> map(sim_nand);
   int i;
 
   printf("%d\n", (int)sizeof(map));
 
-  sim_reset();
-  sim_inject_bad(10);
-  sim_inject_timebombs(30, 20);
+  sim_nand.reset();
+  sim_nand.inject_bad(10);
+  sim_nand.inject_timebombs(30, 20);
 
   printf("Map init\n");
-  dhara_map_init(&map, &sim_nand, page_buf, GC_RATIO);
-  dhara_map_resume(&map, NULL);
-  printf("  capacity: %d\n", dhara_map_capacity(&map));
+  map.init();
+  (void)map.resume();
+  printf("  capacity: %d\n", map.capacity());
   printf("  sector count: %d\n", NUM_SECTORS);
   printf("\n");
 
   printf("Sync...\n");
-  dhara_map_sync(&map, NULL);
+  (void)map.sync();
   printf("Resume...\n");
-  dhara_map_init(&map, &sim_nand, page_buf, GC_RATIO);
-  dhara_map_resume(&map, NULL);
+  map.init();
+  (void)map.resume();
 
   printf("Writing sectors...\n");
   shuffle(0);
   for (i = 0; i < NUM_SECTORS; i++) {
     const sector_t s = sector_list[i];
 
-    mt_write(&map, s, s);
-    mt_check(&map);
+    map.write(s, s);
+    map.check();
   }
 
   printf("Sync...\n");
-  dhara_map_sync(&map, NULL);
+  (void)map.sync();
   printf("Resume...\n");
-  dhara_map_init(&map, &sim_nand, page_buf, GC_RATIO);
-  dhara_map_resume(&map, NULL);
-  printf("  capacity: %d\n", dhara_map_capacity(&map));
-  printf("  use count: %d\n", dhara_map_size(&map));
+  map.init();
+  (void)map.resume();
+  printf("  capacity: %d\n", map.capacity());
+  printf("  use count: %d\n", map.size());
   printf("\n");
 
   printf("Read back...\n");
@@ -182,7 +191,7 @@ int main(void) {
   for (i = 0; i < NUM_SECTORS; i++) {
     const sector_t s = sector_list[i];
 
-    mt_assert(&map, s, s);
+    map.do_assert(s, s);
   }
 
   printf("Rewrite/trim half...\n");
@@ -191,19 +200,19 @@ int main(void) {
     const sector_t s0 = sector_list[i];
     const sector_t s1 = sector_list[i + 1];
 
-    mt_write(&map, s0, ~s0);
-    mt_check(&map);
-    mt_trim(&map, s1);
-    mt_check(&map);
+    map.write(s0, ~s0);
+    map.check();
+    map.trim(s1);
+    map.check();
   }
 
   printf("Sync...\n");
-  dhara_map_sync(&map, NULL);
+  (void)map.sync();
   printf("Resume...\n");
-  dhara_map_init(&map, &sim_nand, page_buf, GC_RATIO);
-  dhara_map_resume(&map, NULL);
-  printf("  capacity: %d\n", dhara_map_capacity(&map));
-  printf("  use count: %d\n", dhara_map_size(&map));
+  map.init();
+  (void)map.resume();
+  printf("  capacity: %d\n", map.capacity());
+  printf("  use count: %d\n", map.size());
   printf("\n");
 
   printf("Read back...\n");
@@ -211,11 +220,11 @@ int main(void) {
     const sector_t s0 = sector_list[i];
     const sector_t s1 = sector_list[i + 1];
 
-    mt_assert(&map, s0, ~s0);
-    mt_assert_blank(&map, s1);
+    map.do_assert(s0, ~s0);
+    map.assert_blank(s1);
   }
 
   printf("\n");
-  sim_dump();
+  sim_nand.dump();
   return 0;
 }
