@@ -33,7 +33,9 @@ const char *strerror(error_t err) {
       [static_cast<int>(error_t::journal_full)] = "Journal is full",
       [static_cast<int>(error_t::not_found)] = "No such sector",
       [static_cast<int>(error_t::map_full)] = "Sector map is full",
-      [static_cast<int>(error_t::corrupt_map)] = "Sector map is corrupted"};
+      [static_cast<int>(error_t::corrupt_map)] = "Sector map is corrupted",
+      [static_cast<int>(error_t::async_stack_ovfl)] = "Not enough stack space for async operation",
+  };
   const char *msg = nullptr;
 
   if ((ecast(err) >= 0) && (ecast(err) < ecast(error_t::max))) msg = messages[ecast(err)];

@@ -107,20 +107,78 @@ void TestJournalBase::recover() {
   check();
   printf("    recover: complete\n");
 }
+void TestJournalBase::recover(AsyncOp<void> &&op) {
+  printf("    recover: start\n");
+  std::move(op).loop(
+      [this, retry_count = int(0), p = page_t(page_none)](auto &&looper,auto pos, auto &&res
+                                                          ) mutable {
+        using Res = std::remove_cvref_t<decltype(res)>;
+        if constexpr (pos == 0) {
+          // first part of loop
+          static_assert(std::is_same_v<Res, std::monostate>);
 
-Outcome<void> TestJournalBase::enqueue(uint32_t id) {
-  const std::size_t page_size = 1u << config.nand.log2_page_size;
+          if (!in_recovery()) {
+            // loop exit
+            check();
+            printf("    recover: complete\n");
+            return std::move(looper).finish_success();
+          }
+          p = next_recoverable();
+          check();
+
+          if (p == page_none)
+            return std::move(looper).continue_after(
+                [&](auto &&op) { return JournalBase::enqueue(nullptr, nullptr, std::move(op)); },
+                loop_case<1>);
+          return std::move(looper).continue_after(
+              [&](auto &&op) {
+                return std::move(op).allocate(config.meta_size, [&](auto &&op,
+                                                                    std::span<std::byte> meta_buf) {
+                  return std::move(op).nested_op(
+                      [&](auto &&op) { return read_meta(p, meta_buf.data(), std::move(op)); },
+                      [this, p, meta = meta_buf.data()](auto &&op, Outcome<void> res) {
+                        if (!res.has_value()) {
+                          dabort("read_meta(p, meta)", res.error());
+                        }
+                        return std::move(op).nested_op(
+                            [&](auto &&op) { return copy(p, meta, std::move(op)); },
+                            [](auto &&op, Outcome<void> res) { return std::move(op).done(res); });
+                      });
+                });
+              },
+              loop_case<1>);
+        } else {
+          static_assert(pos == 1);
+          static_assert(std::is_same_v<Res, Outcome<void>>);
+
+          check();
+
+          if (res.has_error()) {
+            if (res.error() == error_t::recover) {
+              printf("    recover: restart\n");
+              if (++retry_count >= config.max_retries) dabort("recover", error_t::too_bad);
+              return std::move(looper).next(loop_case<0>,dummy_arg);
+            }
+            dabort("copy", res.error());
+          }
+
+          return std::move(looper).next(loop_case<0>,dummy_arg);
+        }
+      },
+      loop_case<0>,dummy_arg);
+}
+
+Outcome<void> TestJournalBase::enqueue(uint32_t id, std::byte *meta_buf) {
+  const std::size_t page_size = config.nand.page_size();
   std::byte r[page_size];
-  std::byte meta[config.meta_size];
-  error_t my_err;
 
   seq_gen(id, {r, page_size});
-  dhara_w32(meta, id);
+  dhara_w32(meta_buf, id);
 
   for (int i = 0; i < config.max_retries; i++) {
     check();
-    auto res = JournalBase::enqueue(r, meta);
-      if(res.has_value())  return res;
+    auto res = JournalBase::enqueue(r, meta_buf);
+    if (res.has_value()) return res;
 
     if (res.error() != error_t::recover) {
       return res;
@@ -132,14 +190,61 @@ Outcome<void> TestJournalBase::enqueue(uint32_t id) {
   return error_t::too_bad;
 }
 
+void TestJournalBase::enqueue(std::uint32_t id, std::byte *meta_buf, AsyncOp<void> &&op) {
+  return std::move(op).allocate(config.nand.page_size(), [&](auto &&op,
+                                                             std::span<std::byte> page_buf) {
+    seq_gen(id, page_buf);
+    dhara_w32(meta_buf, id);
+
+    return std::move(op).loop(
+        [this, id, page_buf, meta_buf, i = int(0)](auto &&looper, auto pos, auto &&arg) mutable {
+          using T = std::remove_cvref_t<decltype(arg)>;
+          if constexpr (pos == 0) {
+            // first part of loop body
+            static_assert(std::is_same_v<T, std::monostate>);
+
+            if (i++ >= config.max_retries) return std::move(looper).finish_failure(error_t::too_bad);
+
+            check();
+
+            return std::move(looper).continue_after(
+                [&](auto &&op) {
+                  return JournalBase::enqueue(page_buf.data(), meta_buf, std::move(op));
+                },
+                loop_case<1>);
+          } else if constexpr (pos == 1) {
+            // second part of loop body
+            static_assert(std::is_same_v<T, Outcome<void>>);
+
+            if (arg.has_value()) return std::move(looper).finish_success();
+            error_t err = arg.error();
+            if (err != error_t::recover) return std::move(looper).finish_failure(err);
+
+            return std::move(looper).continue_after(
+                [&](auto &&op) { return recover(std::move(op)); },
+                loop_case<2>);
+          } else {
+            // third part of loop body
+            static_assert(pos == 2);
+            static_assert(std::is_same_v<T, Outcome<void>>);
+
+            if (arg.has_error()) return std::move(looper).finish_failure(arg.error());
+
+            return std::move(looper).next(loop_case<0>, dummy_arg);
+          }
+        },
+        loop_case<0>, dummy_arg);
+  });
+}
+
 int TestJournalBase::enqueue_sequence(int start, int count) {
-  if (count < 0) count = nand.num_blocks() << nand.log2_ppb();
+  if (count < 0) count = nand.num_blocks() << config.nand.log2_ppb;
 
   for (int i = 0; i < count; i++) {
     std::byte meta[config.meta_size];
 
     {
-      auto res = enqueue(start + i);
+      auto res = enqueue(start + i, meta);
       if (res.has_error()) {
         if (res.error() == error_t::journal_full) return i;
 
@@ -150,12 +255,53 @@ int TestJournalBase::enqueue_sequence(int start, int count) {
     assert(size() >= i);
 
     DHARA_TRY_ABORT(read_meta(this->root(), meta));
-    auto t = dhara_r32(meta);
-    assert(t == start + i);
     assert(dhara_r32(meta) == start + i);
   }
 
   return count;
+}
+
+void TestJournalBase::enqueue_sequence(int start, int count, AsyncOp<int> &&op) {
+  if (count < 0) count = nand.num_blocks() << config.nand.log2_ppb;
+
+  return std::move(op).allocate(config.meta_size, [&](auto &&op, std::span<std::byte> meta) {
+    return std::move(op).loop(
+        [this, start, count, meta, i = int(0)](auto &&looper,auto pos, auto &&arg) mutable {
+          using T = std::remove_cvref_t<decltype(arg)>;
+          if constexpr (pos == 0) {
+            // first part of loop body
+            static_assert(std::is_same_v<T, std::monostate>);
+
+            if (i++ >= count) {
+              return std::move(looper).finish_success(count);
+            }
+            return std::move(looper).continue_after(
+                [&](auto &&op) { return enqueue(start + i, meta.data(), std::move(op)); },
+                loop_case<1>);
+          } else if constexpr (pos == 1) {
+            // second part of loop body
+            static_assert(std::is_same_v<T, Outcome<void>>);
+
+            if (arg.has_error()) {
+              if (arg.error() == error_t::journal_full) return std::move(looper).finish_success(i);
+              return std::move(looper).finish_failure(arg.error());
+            }
+            assert(size() >= i);
+
+            return std::move(looper).continue_after(
+                [&](auto &&op) { return read_meta(this->root(), meta.data(), std::move(op)); },
+                loop_case<2>);
+          } else {
+            // third part of loop body
+            static_assert(pos == 2);
+            static_assert(std::is_same_v<T, Outcome<void>>);
+
+            assert(dhara_r32(meta.data()) == start + i);
+            return std::move(looper).next(loop_case<0>, dummy_arg);
+          }
+        },
+        loop_case<0>, dummy_arg);
+  });
 }
 
 void TestJournalBase::dequeue_sequence(int next, int count) {
@@ -199,8 +345,8 @@ void TestJournalBase::dequeue_sequence(int next, int count) {
 
 void TestJournalBase::dump_info() const {
   printf("    log2_ppc   = %d\n", config.log2_ppc);
-  printf("    size       = %lu\n", size());
-  printf("    capacity   = %lu\n", capacity());
+  printf("    size       = %u\n", size());
+  printf("    capacity   = %u\n", capacity());
   printf("    bb_current = %d\n", bb_current);
   printf("    bb_last    = %d\n", bb_last);
 }

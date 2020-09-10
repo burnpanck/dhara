@@ -63,6 +63,9 @@ bool SimNand::is_bad(block_t bno) const noexcept {
   if (!stats.frozen) stats.is_bad++;
   return blocks[bno].flags.bad_mark;
 }
+void SimNand::is_bad(block_t bno, AsyncOp<bool> &&op) const noexcept {
+  return std::move(op).run_in_thread([=](){ return is_bad(bno); });
+}
 
 /* Mark bad the given block (or attempt to). No return value is
  * required, because there's nothing that can be done in response.
@@ -80,6 +83,9 @@ void SimNand::mark_bad(block_t bno) noexcept {
 
   if (!stats.frozen) stats.mark_bad++;
   blocks[bno].flags.bad_mark = true;
+}
+void SimNand::mark_bad(block_t bno, AsyncOp<void> &&op) noexcept {
+  return std::move(op).run_in_thread([=](){ return mark_bad(bno); });
 }
 
 /* Erase the given block. This function should return 0 on success or -1
@@ -122,6 +128,9 @@ Outcome<void> SimNand::erase(block_t bno) noexcept {
 
   memset(blk.data(), 0xff, blk.size_bytes());
   return error_t::none;
+}
+void SimNand::erase(block_t bno, AsyncOp<void> &&op) noexcept {
+  return std::move(op).run_in_thread([=](){ return erase(bno); });
 }
 
 /* Program the given page. The data pointer is a pointer to an entire
@@ -179,6 +188,9 @@ Outcome<void> SimNand::prog(page_t p, const std::byte *data) noexcept {
   memcpy(page.data(), data, page.size_bytes());
   return error_t::none;
 }
+void SimNand::prog(page_t p, const std::byte *data, AsyncOp<void> &&op) noexcept {
+  return std::move(op).run_in_thread([=](){ return prog(p, data); });
+}
 
 /* Check that the given page is erased */
 bool SimNand::is_free(page_t p) const noexcept {
@@ -197,6 +209,9 @@ bool SimNand::is_free(page_t p) const noexcept {
 
   if (!stats.frozen) stats.is_erased++;
   return blocks[bno].next_page <= pno;
+}
+void SimNand::is_free(page_t p, AsyncOp<bool> &&op) const noexcept {
+  return std::move(op).run_in_thread([=](){ return is_free(p); });
 }
 
 /* Read a portion of a page. ECC must be handled by the NAND
@@ -232,6 +247,9 @@ Outcome<void> SimNand::read(page_t p, size_t offset, std::span<std::byte> data) 
   memcpy(data.data(), page.data(), data.size_bytes());
   return error_t::none;
 }
+void SimNand::read(page_t p, size_t offset, std::span<std::byte> data, AsyncOp<void> &&op) const noexcept {
+  return std::move(op).run_in_thread([=](){ return read(p, offset, data); });
+}
 
 /* Read a page from one location and reprogram it in another location.
  * This might be done using the chip's internal buffers, but it must use
@@ -244,6 +262,9 @@ Outcome<void> SimNand::copy(page_t src, page_t dst) noexcept {
   DHARA_TRY(prog(dst, buf.data()));
 
   return error_t::none;
+}
+void SimNand::copy(page_t src, page_t dst, AsyncOp<void> &&op) noexcept {
+  return std::move(op).run_in_thread([=](){ return copy(src, dst); });
 }
 
 static char rep_status(const struct block_status *b) {

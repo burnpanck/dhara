@@ -142,11 +142,10 @@ JournalBase::JournalBase(const JournalConfig &config, NandBase &n, byte_buf_t pa
  * location -- otherwise, we would have considered the block eraseable.
  */
 Outcome<block_t> JournalBase::find_checkblock(block_t blk) noexcept {
-  const std::size_t page_size = nand.page_size();
   const auto page_buf = this->page_buf();
 
   for (int i = 0; (blk < nand.num_blocks()) && (i < config.max_retries); i++) {
-    const page_t p = (blk << nand.log2_ppb()) | ((1u << config.log2_ppc) - 1u);
+    const page_t p = (blk << config.nand.log2_ppb) | ((1u << config.log2_ppc) - 1u);
 
     if (!(nand.is_bad(blk) || nand.read(p, 0, page_buf).has_error()) &&
         hdr_has_magic(hdr_cbuf_t(page_buf))) {
@@ -157,6 +156,43 @@ Outcome<block_t> JournalBase::find_checkblock(block_t blk) noexcept {
   }
 
   return error_t::too_bad;
+}
+
+void JournalBase::find_checkblock(block_t blk, AsyncOp<block_t> &&op) noexcept {
+  return std::move(op).loop(
+      [this, blk, i = int(0)](auto &&looper, auto pos, auto &&res) mutable {
+        using Res = std::remove_cvref_t<decltype(res)>;
+        if constexpr (pos == 0) {
+          if (!((blk < nand.num_blocks()) && (i < config.max_retries))) {
+            // loop exit
+            return std::move(looper).finish_failure(error_t::too_bad);
+          }
+          ++i;
+          return std::move(looper).template continue_after<bool>(
+              [&](auto &&op) { return nand.is_bad(blk, std::move(op)); }, loop_case<1>);
+        } else if constexpr (pos == 1) {
+          static_assert(std::is_same_v<Res, Outcome<bool>>);
+          if (res.has_error()) return std::move(looper).finish_failure(res.error());
+          if (res.value()) return std::move(looper).next(loop_case<3>, dummy_arg);
+          return std::move(looper).continue_after(
+              [&](auto &&op) {
+                const page_t p = (blk << config.nand.log2_ppb) | ((1u << config.log2_ppc) - 1u);
+                return nand.read(p, 0, this->page_buf(), std::move(op));
+              },
+              loop_case<2>);
+        } else if constexpr (pos == 2) {
+          static_assert(std::is_same_v<Res, Outcome<void>>);
+          if (res.has_error()) return std::move(looper).next(loop_case<3>, dummy_arg);
+          if (hdr_has_magic(hdr_cbuf_t(this->page_buf())))
+            return std::move(looper).finish_success(blk);
+          return std::move(looper).next(loop_case<3>, dummy_arg);
+        } else {
+          static_assert(pos == 3);
+          blk++;
+          return std::move(looper).next(loop_case<0>, dummy_arg);
+        }
+      },
+      loop_case<0>, dummy_arg);
 }
 
 block_t JournalBase::find_last_checkblock(block_t first) noexcept {
@@ -345,6 +381,11 @@ Outcome<void> JournalBase::resume() noexcept {
   return error_t::none;
 }
 
+void JournalBase::resume(AsyncOp<void> &&op) noexcept {
+  // TODO: implement!
+  std::move(op).run_in_thread([&]() { return resume(); });
+}
+
 /**************************************************************************
  * Public interface
  */
@@ -405,16 +446,41 @@ Outcome<void> JournalBase::read_meta(page_t p, std::byte *buf) noexcept {
   return nand.read(p | ppc_mask, offset, out_buf);
 }
 
+void JournalBase::read_meta(page_t p, std::byte *buf, AsyncOp<void> &&op) noexcept {
+  /* Offset of metadata within the metadata page */
+  const page_t ppc_mask = (1u << config.log2_ppc) - 1;
+  const size_t offset = hdr_user_offset(p & ppc_mask);
+  byte_buf_t out_buf(buf, config.meta_size);
+
+  /* Special case: buffered metadata */
+  if (align_eq(p, head, config.log2_ppc)) {
+    memcpy(out_buf.data(), page_buf_ptr + offset, out_buf.size_bytes());
+    return std::move(op).success();
+  }
+
+  /* Special case: incomplete metadata dumped at start of
+   * recovery.
+   */
+  if ((recover_meta != page_none) && align_eq(p, recover_root, config.log2_ppc)) {
+    return nand.read(recover_meta, offset, out_buf, std::move(op));
+  }
+
+  /* General case: fetch from metadata page for checkpoint group */
+  return nand.read(p | ppc_mask, offset, out_buf, std::move(op));
+}
+
 page_t JournalBase::peek() noexcept {
   if (head == tail) return page_none;
 
-  if (is_aligned(tail, nand.log2_ppb())) {
-    block_t blk = tail >> nand.log2_ppb();
+  const std::uint8_t log2_ppb = config.nand.log2_ppb;
+
+  if (is_aligned(tail, log2_ppb)) {
+    block_t blk = tail >> log2_ppb;
     int i;
 
     for (i = 0; i < config.max_retries; i++) {
-      if ((blk == (head >> nand.log2_ppb())) || !nand.is_bad(blk)) {
-        tail = blk << nand.log2_ppb();
+      if ((blk == (head >> log2_ppb)) || !nand.is_bad(blk)) {
+        tail = blk << log2_ppb;
 
         if (tail == head) root_ = page_none;
 
@@ -426,6 +492,49 @@ page_t JournalBase::peek() noexcept {
   }
 
   return tail;
+}
+
+void JournalBase::peek(AsyncOp<page_t> &&op) noexcept {
+  if (head == tail) return std::move(op).success(page_none);
+
+  const std::uint8_t log2_ppb = config.nand.log2_ppb;
+
+  if (is_aligned(tail, log2_ppb)) {
+    block_t blk = tail >> log2_ppb;
+    return std::move(op).loop(
+        [this, blk, i = int(0)](auto &&looper, auto &&arg) mutable {
+          using T = std::remove_cvref_t<decltype(arg)>;
+          if constexpr (std::is_same_v<T, std::monostate>) {
+            // first half of loop body
+            if (i++ >= config.max_retries) {
+              return std::move(looper).finish_success(tail);
+            }
+            if (blk == (head >> config.nand.log2_ppb)) {
+              return std::move(looper).next(Outcome<bool>(false));
+            }
+            return std::move(looper).template continue_after<bool>(
+                [&](auto &&op) { return nand.is_bad(blk, std::move(op)); });
+          } else {
+            // second half of loop body
+            static_assert(std::is_same_v<T, Outcome<bool>>);
+            if (!arg.has_value()) return std::move(looper).finish_failure(arg.error());
+            bool is_bad = arg.value();
+            if (is_bad) {
+              blk = next_block(nand, blk);
+              // continue
+              return std::move(looper).next(std::monostate{});
+            }
+            // we're done
+            tail = blk << config.nand.log2_ppb;
+
+            if (tail == head) root_ = page_none;
+            return std::move(looper).finish_success(tail);
+          }
+        },
+        std::monostate{});
+  }
+
+  return std::move(op).success(tail);
 }
 
 void JournalBase::dequeue() noexcept {
@@ -493,6 +602,50 @@ Outcome<void> JournalBase::prepare_head() noexcept {
 
   return error_t::too_bad;
 }
+void JournalBase::prepare_head(AsyncOp<void> &&op) noexcept {
+  const std::uint8_t log2_ppb = config.nand.log2_ppb;
+  const page_t next = next_upage(head);
+  int i;
+
+  /* We can't write if doing so would cause the head pointer to
+   * roll onto the same block as the last-synced tail.
+   */
+  if (align_eq(next, tail_sync, log2_ppb) && !align_eq(next, head, log2_ppb)) {
+    return std::move(op).failure(error_t::journal_full);
+  }
+
+  flags[int(Flag::dirty)] = true;
+  if (!is_aligned(head, log2_ppb)) return std::move(op).success();
+
+  return std::move(op).loop(
+      [this, blk = block_t(0), i = int(0)](auto &&looper, auto pos, auto &&res) mutable {
+        using Res = std::remove_cvref_t<decltype(res)>;
+        if constexpr (pos == 0) {
+          if (i++ >= config.max_retries) {
+            // loop exit
+            return std::move(looper).finish_failure(error_t::too_bad);
+          }
+          blk = head >> config.nand.log2_ppb;
+          return std::move(looper).template continue_after<bool>(
+              [&](auto &&op) { return nand.is_bad(blk, std::move(op)); }, loop_case<1>);
+        } else if constexpr (pos == 1) {
+          static_assert(std::is_same_v<Res, Outcome<bool>>);
+          if (!res.has_value()) return std::move(looper).finish_failure(res.error());
+          if (!res.value())
+            return std::move(looper).continue_after(
+                [&](auto &&op) { return nand.erase(blk, std::move(op)); }, loop_case<2>);
+          bb_current++;
+          auto r = skip_block();
+          if (r.has_error()) return std::move(looper).finish_failure(r.error());
+          return std::move(looper).next(loop_case<0>, dummy_arg);
+        } else {
+          static_assert(pos == 2);
+          static_assert(std::is_same_v<Res, Outcome<void>>);
+          return std::move(looper).finish_with(res);
+        }
+      },
+      loop_case<0>, dummy_arg);
+}
 
 void JournalBase::restart_recovery(page_t old_head) noexcept {
   const std::uint8_t log2_ppb = config.nand.log2_ppb;
@@ -515,6 +668,34 @@ void JournalBase::restart_recovery(page_t old_head) noexcept {
 
   root_ = recover_root;
 }
+void JournalBase::restart_recovery(page_t old_head, AsyncOp<void> &&op) noexcept {
+  auto finish = [this](auto &&op, Outcome<void> res = error_t::none) {
+    /* Start recovery again. Reset the source enumeration to
+     * the start of the original bad block, and reset the
+     * destination enumeration to the newly found good
+     * block.
+     */
+    flags[int(Flag::enum_done)] = false;
+    recover_next = recover_root & ~((1u << config.nand.log2_ppb) - 1u);
+
+    root_ = recover_root;
+
+    return std::move(op).success();
+  };
+
+  /* Mark the current head bad immediately, unless we're also
+   * using it to hold our dumped metadata (it will then be marked
+   * bad at the end of recovery).
+   */
+  if ((recover_meta == page_none) || !align_eq(recover_meta, old_head, config.nand.log2_ppb)) {
+    return std::move(op).nested_op(
+        [&](auto &&op) { nand.mark_bad(old_head >> config.nand.log2_ppb, std::move(op)); },
+        std::move(finish));
+  } else {
+    flags[int(Flag::bad_meta)] = true;
+    return finish(std::move(op));
+  }
+}
 
 Outcome<void> JournalBase::dump_meta() noexcept {
   const std::uint8_t log2_page_size = config.nand.log2_page_size;
@@ -534,8 +715,7 @@ Outcome<void> JournalBase::dump_meta() noexcept {
       hdr_clear_user(page_buf, log2_page_size);
       return error_t::none;
     }();
-    if(res.has_value())
-      return error_t::none;
+    if (res.has_value()) return error_t::none;
 
     /* Report fatal errors */
     if (res.error() != error_t::bad_block) {
@@ -549,6 +729,52 @@ Outcome<void> JournalBase::dump_meta() noexcept {
   }
 
   return error_t::too_bad;
+}
+void JournalBase::dump_meta(AsyncOp<void> &&op) noexcept {
+  return std::move(op).loop(
+      [this, i = int(0)](auto &&looper, auto pos, auto &&res) mutable {
+        using Res = std::remove_cvref_t<decltype(res)>;
+        if constexpr (pos == 0) {
+          if (i++ >= config.max_retries) {
+            // loop exit
+            return std::move(looper).finish_failure(error_t::too_bad);
+          }
+          return std::move(looper).continue_after([&](auto &&op) { prepare_head(std::move(op)); },
+                                                  loop_case<1>);
+        } else if constexpr (pos == 1) {
+          static_assert(std::is_same_v<Res, Outcome<void>>);
+          if (res.has_error()) return std::move(looper).next(loop_case<3>, res);
+          return std::move(looper).continue_after(
+              [&](auto &&op) { nand.prog(head, page_buf_ptr, std::move(op)); }, loop_case<2>);
+        } else if constexpr (pos == 2) {
+          static_assert(std::is_same_v<Res, Outcome<void>>);
+          if (res.has_error()) return std::move(looper).next(loop_case<3>, res);
+          recover_meta = head;
+          head = next_upage(head);
+          if (!head) roll_stats();
+          hdr_clear_user(page_buf(), config.nand.log2_page_size);
+          return std::move(looper).finish_success();
+        } else if constexpr (pos == 3) {
+          static_assert(std::is_same_v<Res, Outcome<void>>);
+          assert(res.has_error());
+          if (res.error() != error_t::bad_block)
+            return std::move(looper).finish_failure(res.error());
+          bb_current++;
+          return std::move(looper).continue_after(
+              [&](auto &&op) { nand.mark_bad(head >> config.nand.log2_ppb, std::move(op)); },
+              loop_case<4>);
+        } else {
+          static_assert(pos == 4);
+          static_assert(std::is_same_v<Res, Outcome<void>>);
+          if (res.has_error()) return std::move(looper).finish_failure(res.error());
+          {
+            auto r = skip_block();
+            if (r.has_error()) return std::move(looper).finish_failure(r.error());
+          }
+          return std::move(looper).next(loop_case<0>, dummy_arg);
+        }
+      },
+      loop_case<0>, dummy_arg);
 }
 
 Outcome<void> JournalBase::recover_from(error_t write_err) noexcept {
@@ -587,6 +813,52 @@ Outcome<void> JournalBase::recover_from(error_t write_err) noexcept {
   flags[int(Flag::recovery)] = true;
   return error_t::recover;
 }
+void JournalBase::recover_from(error_t write_err, AsyncOp<void> &&op) noexcept {
+  const std::uint8_t log2_ppb = config.nand.log2_ppb;
+
+  const page_t old_head = head;
+
+  if (write_err != error_t::bad_block) {
+    return std::move(op).failure(write_err);
+  }
+
+  /* Advance to the next free page */
+  bb_current++;
+  {
+    auto r = skip_block();
+    if (r.has_error()) return std::move(op).failure(r.error());
+  }
+
+  /* Are we already in the middle of a recovery? */
+  if (in_recovery()) {
+    return std::move(op).nested_op(
+        [&](auto &&op) { restart_recovery(old_head, std::move(op)); },
+        [](auto &&op, auto r) {
+          return std::move(op).failure(r.has_error() ? r.error() : error_t::recover);
+        });
+  }
+
+  /* Were we block aligned? No recovery required! */
+  if (is_aligned(old_head, log2_ppb)) {
+    return nand.mark_bad(old_head >> log2_ppb, std::move(op));
+  }
+
+  recover_root = root_;
+  recover_next = recover_root & ~((1u << log2_ppb) - 1u);
+
+  /* Are we holding buffered metadata? Dump it first. */
+  if (!is_aligned(old_head, config.log2_ppc)) {
+    return std::move(op).nested_op([&](auto &&op) { dump_meta(std::move(op)); },
+                                   [this](auto &&op, auto r) {
+                                     if (r.has_error()) return std::move(op).failure(r.error());
+                                     flags[int(Flag::recovery)] = true;
+                                     return std::move(op).failure(error_t::recover);
+                                   });
+  }
+
+  flags[int(Flag::recovery)] = true;
+  return std::move(op).failure(error_t::recover);
+}
 
 void JournalBase::finish_recovery() noexcept {
   /* We just recovered the last page. Mark the recovered
@@ -601,6 +873,34 @@ void JournalBase::finish_recovery() noexcept {
 
   /* Was the tail on this page? Skip it forward */
   clear_recovery();
+}
+void JournalBase::finish_recovery(AsyncOp<void> &&op) noexcept {
+  /* We just recovered the last page. Mark the recovered
+   * block as bad.
+   */
+  return std::move(op).nested_op(
+      [&](auto &&op) { nand.mark_bad(recover_root >> config.nand.log2_ppb, std::move(op)); },
+      [this](auto &&op, auto &&res) {
+        if (res.has_error()) return std::move(op).failure(res.error());
+        /* If we had to dump metadata, and the page on which we
+         * did this also went bad, mark it bad too.
+         */
+        if (flags[int(Flag::bad_meta)]) {
+          return std::move(op).nested_op(
+              [&](auto &&op) {
+                nand.mark_bad(recover_meta >> config.nand.log2_ppb, std::move(op));
+              },
+              [this](auto &&op, auto &&res) {
+                if (res.has_error()) return std::move(op).failure(res.error());
+                clear_recovery();
+                return std::move(op).success();
+              });
+        }
+
+        /* Was the tail on this page? Skip it forward */
+        clear_recovery();
+        return std::move(op).success();
+      });
 }
 
 Outcome<void> JournalBase::push_meta(const std::byte *meta) noexcept {
@@ -651,6 +951,63 @@ Outcome<void> JournalBase::push_meta(const std::byte *meta) noexcept {
 
   return error_t::none;
 }
+void JournalBase::push_meta(const std::byte *meta, AsyncOp<void> &&op) noexcept {
+  const page_t old_head = head;
+  const size_t offset = hdr_user_offset(head & ((1u << config.log2_ppc) - 1u));
+  const auto page_buf = this->page_buf();
+  const byte_buf_t meta_buf(page_buf.subspan(offset, config.meta_size));
+
+  /* We've just written a user page. Add the metadata to the
+   * buffer.
+   */
+  if (meta)
+    memcpy(meta_buf.data(), meta, meta_buf.size_bytes());
+  else
+    memset(meta_buf.data(), 0xff, meta_buf.size_bytes());
+
+  /* Unless we've filled the buffer, don't do any IO */
+  if (!is_aligned(head + 2, config.log2_ppc)) {
+    root_ = head;
+    head++;
+    return std::move(op).success();
+  }
+
+  /* We don't need to check for immediate recover, because that'll
+   * never happen -- we're not block-aligned.
+   */
+  hdr_buf_t hdr_buf(page_buf);
+  hdr_put_magic(hdr_buf);
+  hdr_set_epoch(hdr_buf, epoch);
+  hdr_set_tail(hdr_buf, tail);
+  hdr_set_bb_current(hdr_buf, bb_current);
+  hdr_set_bb_last(hdr_buf, bb_last);
+
+  return std::move(op).nested_op(
+      [&](auto &&op) { nand.prog(head + 1, page_buf.data(), std::move(op)); },
+      [this, old_head](auto &&op, auto &&res) {
+        if (res.has_error()) return recover_from(res.error(), std::move(op));
+
+        flags[int(Flag::dirty)] = false;
+
+        root_ = old_head;
+        head = next_upage(head);
+
+        if (!head) roll_stats();
+
+        auto finalise = [this](auto &&op, Outcome<void> res = error_t::none) {
+          if (res.has_error()) return std::move(op).failure(res.error());
+
+          if (!flags[int(Flag::recovery)]) tail_sync = tail;
+
+          return std::move(op).success();
+        };
+
+        if (flags[int(Flag::enum_done)])
+          return std::move(op).nested_op([&](auto &&op) { finish_recovery(std::move(op)); },
+                                         std::move(finalise));
+        return finalise(std::move(op));
+      });
+}
 
 Outcome<void> JournalBase::enqueue(const std::byte *data, const std::byte *meta) noexcept {
   for (int i = 0; i < config.max_retries; i++) {
@@ -670,6 +1027,13 @@ Outcome<void> JournalBase::enqueue(const std::byte *data, const std::byte *meta)
 
   return error_t::too_bad;
 }
+void JournalBase::enqueue(const std::byte *data, const std::byte *meta,
+                          AsyncOp<void> &&op) noexcept {
+  /*  return std::move(op).loop([this, data, meta](auto &&looper, auto pos, auto &&res =
+     std::monostate{}) mutable { using Res = std::remove_cvref_t<decltype(res)>;
+
+      }, std::monostate{}, std::integral_constant<int,0>{});*/
+}
 
 Outcome<void> JournalBase::copy(page_t p, const std::byte *meta) noexcept {
   for (int i = 0; i < config.max_retries; i++) {
@@ -686,6 +1050,40 @@ Outcome<void> JournalBase::copy(page_t p, const std::byte *meta) noexcept {
   }
 
   return error_t::too_bad;
+}
+void JournalBase::copy(page_t p, const std::byte *meta, AsyncOp<void> &&op) noexcept {
+  return std::move(op).loop(
+      [this, p, meta, i = int(0)](auto &&looper, auto pos, auto &&res) mutable {
+        using Res = std::remove_cvref_t<decltype(res)>;
+        if constexpr (pos == 0) {
+          if (i++ >= config.max_retries) {
+            // loop exit
+            return std::move(looper).finish_failure(error_t::too_bad);
+          }
+          return std::move(looper).continue_after(
+              [&](auto &&op) { return prepare_head(std::move(op)); }, loop_case<1>);
+        } else if constexpr (pos == 1) {
+          static_assert(std::is_same_v<Res, Outcome<void>>);
+          if (!res.has_value()) return std::move(looper).next(loop_case<2>, res);
+          return std::move(looper).continue_after(
+              [&](auto &&op) { return nand.copy(p, head, std::move(op)); }, loop_case<2>);
+        } else if constexpr (pos == 2) {
+          static_assert(std::is_same_v<Res, Outcome<void>>);
+          if (res.has_value())
+            return std::move(looper).continue_after(
+                [&](auto &&op) { return push_meta(meta, std::move(op)); }, loop_case<4>);
+          return std::move(looper).continue_after(
+              [&](auto &&op) { return recover_from(res.error(), std::move(op)); }, loop_case<3>);
+        } else if constexpr (pos == 3) {
+          static_assert(std::is_same_v<Res, Outcome<void>>);
+          if (res.has_error()) return std::move(looper).finish_failure(res.error());
+          return std::move(looper).next(loop_case<0>, dummy_arg);
+        } else {
+          static_assert(pos == 4);
+          return std::move(looper).finish_with(res);
+        }
+      },
+      loop_case<0>, dummy_arg);
 }
 
 page_t JournalBase::next_recoverable() noexcept {

@@ -25,6 +25,7 @@ set(tests
         error
         jfill
         journal
+        journal-async
         map
         nand
         recovery

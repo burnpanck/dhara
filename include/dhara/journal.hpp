@@ -18,6 +18,7 @@
 #define DHARA_JOURNAL_H_
 
 #include <dhara/nand.hpp>
+#include <dhara/async.hpp>
 
 #include <bitset>
 #include <cstdint>
@@ -110,6 +111,7 @@ class JournalBase {
    * If this operation fails, the journal will be reset to an empty state.
    */
   Outcome<void> resume() noexcept;
+  void resume(AsyncOp<void> &&op) noexcept;
 
   /* Obtain an upper bound on the number of user pages storable in the
    * journal.
@@ -129,6 +131,7 @@ class JournalBase {
    * ready to read. If no page is ready, return `page_none`.
    */
   page_t peek() noexcept;
+  void peek(AsyncOp<page_t> &&op) noexcept;
 
   /* Remove the last page from the journal. This doesn't take permanent
    * effect until the next checkpoint.
@@ -190,11 +193,14 @@ class JournalBase {
   }
 
   Outcome<void> read_meta(page_t p, std::byte *buf) noexcept;
+  void read_meta(page_t p, std::byte *buf, AsyncOp<void> &&op) noexcept;
   Outcome<void> enqueue(const std::byte *data, const std::byte *meta) noexcept;
+  void enqueue(const std::byte *data, const std::byte *meta, AsyncOp<void> &&op) noexcept;
   Outcome<void> enqueue() noexcept {
     return enqueue(nullptr, nullptr);
   }
   Outcome<void> copy(page_t p, const std::byte *meta) noexcept;
+  void copy(page_t p, const std::byte *meta, AsyncOp<void> &&op) noexcept;
 
  private:
   /* Clear user metadata */
@@ -213,18 +219,30 @@ class JournalBase {
   void reset_journal() noexcept;
   void roll_stats() noexcept;
   Outcome<block_t> find_checkblock(block_t blk) noexcept;
+  void find_checkblock(block_t blk, AsyncOp<block_t> &&op) noexcept;
   block_t find_last_checkblock(block_t first) noexcept;
+  void find_last_checkblock(block_t first, AsyncOp<block_t> &&op) noexcept;
   [[nodiscard]] bool cp_free(page_t first_user) const noexcept;
+  void cp_free(page_t first_user, AsyncOp<bool> &&op) const noexcept;
   [[nodiscard]] page_t find_last_group(block_t blk) const noexcept;
+  void find_last_group(block_t blk, AsyncOp<page_t> &&op) const noexcept;
   Outcome<void> find_root(page_t start) noexcept;
+  void find_root(page_t start, AsyncOp<void> &&op) noexcept;
   Outcome<void> find_head(page_t start) noexcept;
+  void find_head(page_t start, AsyncOp<void> &&op) noexcept;
   Outcome<void> skip_block() noexcept;
   Outcome<void> prepare_head() noexcept;
+  void prepare_head(AsyncOp<void> &&op) noexcept;
   void restart_recovery(page_t old_head) noexcept;
+  void restart_recovery(page_t old_head, AsyncOp<void> &&op) noexcept;
   Outcome<void> dump_meta() noexcept;
+  void dump_meta(AsyncOp<void> &&op) noexcept;
   Outcome<void> recover_from(error_t write_err) noexcept;
+  void recover_from(error_t write_err, AsyncOp<void> &&op) noexcept;
   void finish_recovery() noexcept;
+  void finish_recovery(AsyncOp<void> &&op) noexcept;
   Outcome<void> push_meta(const std::byte *meta) noexcept;
+  void push_meta(const std::byte *meta, AsyncOp<void> &&op) noexcept;
 
   // Member variables are protected not private to give direct access for testing
  protected:

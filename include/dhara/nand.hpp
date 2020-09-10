@@ -17,6 +17,7 @@
 #ifndef DHARA_NAND_H_
 #define DHARA_NAND_H_
 
+#include <dhara/async.hpp>
 #include <dhara/error.hpp>
 
 #include <cstddef>
@@ -48,11 +49,13 @@ class NandBase {
  public:
   /* Is the given block bad? */
   virtual bool is_bad(block_t b) const noexcept = 0;
+  virtual void is_bad(block_t b, AsyncOp<bool> &&op) const noexcept = 0;
 
   /* Mark bad the given block (or attempt to). No return value is
    * required, because there's nothing that can be done in response.
    */
   virtual void mark_bad(block_t b) noexcept = 0;
+  virtual void mark_bad(block_t b, AsyncOp<void> &&op) noexcept = 0;
 
   /* Erase the given block. This function should return 0 on success or -1
    * on failure.
@@ -61,6 +64,7 @@ class NandBase {
    * operation fails, return -1 and set err to E_BAD_BLOCK.
    */
   virtual Outcome<void> erase(block_t b) noexcept = 0;
+  virtual void erase(block_t b, AsyncOp<void> &&op) noexcept = 0;
 
   /* Program the given page. The data pointer is a pointer to an entire
    * page ((1 << log2_page_size) bytes). The operation status should be
@@ -71,9 +75,11 @@ class NandBase {
    * reprogrammed.
    */
   virtual Outcome<void> prog(page_t p, const std::byte *data) noexcept = 0;
+  virtual void prog(page_t p, const std::byte *data, AsyncOp<void> &&op) noexcept = 0;
 
   /* Check that the given page is erased */
   [[nodiscard]] virtual bool is_free(page_t p) const noexcept = 0;
+  virtual void is_free(page_t p, AsyncOp<bool> &&op) const noexcept = 0;
 
   /* Read a portion of a page. ECC must be handled by the NAND
    * implementation. Returns 0 on sucess or -1 if an error occurs. If an
@@ -81,12 +87,15 @@ class NandBase {
    */
   virtual Outcome<void> read(page_t p, std::size_t offset,
                              std::span<std::byte> data) const noexcept = 0;
+  virtual void read(page_t p, std::size_t offset, std::span<std::byte> data,
+                    AsyncOp<void> &&op) const noexcept = 0;
 
   /* Read a page from one location and reprogram it in another location.
    * This might be done using the chip's internal buffers, but it must use
    * ECC.
    */
   virtual Outcome<void> copy(page_t src, page_t dst) noexcept = 0;
+  virtual void copy(page_t src, page_t dst, AsyncOp<void> &&op) noexcept = 0;
 
   /* Base-2 logarithm of the page size. If your device supports
    * partial programming, you may want to subdivide the actual
@@ -133,6 +142,7 @@ struct NandConfig {
 template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_, typename Base = NandBase>
 class Nand : public Base {
   using base_t = Base;
+
  public:
   static constexpr NandConfig config = {log2_page_size_, log2_ppb_};
 
@@ -170,15 +180,18 @@ class Nand : public Base {
   }
 
   /* Program the given page. The data pointer is a pointer to an entire
- * page ((1 << log2_page_size) bytes). The operation status should be
- * checked. If the operation fails, return -1 and set err to
- * E_BAD_BLOCK.
- *
- * Pages will be programmed sequentially within a block, and will not be
- * reprogrammed.
- */
+   * page ((1 << log2_page_size) bytes). The operation status should be
+   * checked. If the operation fails, return -1 and set err to
+   * E_BAD_BLOCK.
+   *
+   * Pages will be programmed sequentially within a block, and will not be
+   * reprogrammed.
+   */
   virtual Outcome<void> prog(page_t p, page_cspan_t data) noexcept {
     return base_t::prog(p, data.data());
+  }
+  virtual void prog(page_t p, page_cspan_t data, AsyncOp<void> &&op) noexcept {
+    base_t::prog(p, data.data(), std::move(op));
   }
 };
 

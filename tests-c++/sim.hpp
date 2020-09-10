@@ -70,11 +70,13 @@ class SimNand : public NandBase {
  public:
   /* Is the given block bad? */
   virtual bool is_bad(block_t b) const noexcept override;
+  virtual void is_bad(block_t b, AsyncOp<bool> &&op) const noexcept override;
 
   /* Mark bad the given block (or attempt to). No return value is
    * required, because there's nothing that can be done in response.
    */
   virtual void mark_bad(block_t b) noexcept override;
+  virtual void mark_bad(block_t b, AsyncOp<void> &&op) noexcept override;
 
   /* Erase the given block. This function should return 0 on success or -1
    * on failure.
@@ -83,6 +85,7 @@ class SimNand : public NandBase {
    * operation fails, return -1 and set err to E_BAD_BLOCK.
    */
   virtual Outcome<void> erase(block_t b) noexcept override;
+  virtual void erase(block_t b, AsyncOp<void> &&op) noexcept override;
 
   /* Program the given page. The data pointer is a pointer to an entire
    * page ((1 << log2_page_size) bytes). The operation status should be
@@ -93,9 +96,11 @@ class SimNand : public NandBase {
    * reprogrammed.
    */
   virtual Outcome<void> prog(page_t p, const std::byte *data) noexcept override;
+  virtual void prog(page_t p, const std::byte *data, AsyncOp<void> &&op) noexcept override;
 
   /* Check that the given page is erased */
   virtual bool is_free(page_t p) const noexcept override;
+  virtual void is_free(page_t p, AsyncOp<bool> &&op) const noexcept override;
 
   /* Read a portion of a page. ECC must be handled by the NAND
    * implementation. Returns 0 on sucess or -1 if an error occurs. If an
@@ -103,12 +108,15 @@ class SimNand : public NandBase {
    */
   virtual Outcome<void> read(page_t p, size_t offset,
                              std::span<std::byte> data) const noexcept override;
+  virtual void read(page_t p, size_t offset,
+                             std::span<std::byte> data, AsyncOp<void> &&op) const noexcept override;
 
   /* Read a page from one location and reprogram it in another location.
    * This might be done using the chip's internal buffers, but it must use
    * ECC.
    */
   virtual Outcome<void> copy(page_t src, page_t dst) noexcept override;
+  virtual void copy(page_t src, page_t dst, AsyncOp<void> &&op) noexcept override;
 
  public:
   /* Reset to start-up defaults */

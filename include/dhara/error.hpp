@@ -31,6 +31,7 @@ enum class error_t {
   not_found,
   map_full,
   corrupt_map,
+  async_stack_ovfl,
   max
 };
 
@@ -48,7 +49,7 @@ class [[nodiscard]] Outcome {
   [[nodiscard]] constexpr bool has_value() const noexcept { return content.index(); }
   [[nodiscard]] constexpr bool has_error() const noexcept { return !content.index(); }
   constexpr decltype(auto) value() &noexcept { return std::get<1>(content); }
-  constexpr decltype(auto) value() &&noexcept { return std::get<1>(content); }
+  constexpr decltype(auto) value() &&noexcept { return std::get<1>(std::move(content)); }
   constexpr decltype(auto) value() const &noexcept { return std::get<1>(content); }
   [[nodiscard]] constexpr error_t error() const noexcept { return std::get<0>(content); }
 

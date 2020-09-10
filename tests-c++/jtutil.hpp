@@ -35,6 +35,7 @@ class TestJournalBase : public JournalBase {
    * all other errors except E_JOURNAL_FULL are fatal.
    */
   int enqueue_sequence(int start, int count);
+  void enqueue_sequence(int start, int count, AsyncOp<int> &&op);
 
   /* Dequeue a sequence of seed/payload pages. Make sure there's not too
    * much garbage, and that we get the non-garbage pages in the expected
@@ -54,7 +55,9 @@ class TestJournalBase : public JournalBase {
  private:
   void check_upage(page_t p) const;
   void recover();
-  Outcome<void> enqueue(uint32_t id);
+  void recover(AsyncOp<void> &&op);
+  Outcome<void> enqueue(std::uint32_t id, std::byte *meta_buf);
+  void enqueue(std::uint32_t id, std::byte *meta_buf, AsyncOp<void> &&op);
 };
 
 template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_, std::size_t meta_size_ = 132u,
