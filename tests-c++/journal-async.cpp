@@ -21,19 +21,16 @@
 #include <dhara/journal.hpp>
 
 #include <cassert>
-#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <future>
-#include <optional>
-#include <thread>
 
 using namespace std;
 using namespace dhara;
 using namespace dhara_tests;
 
-void suspend_resume(TestJournalBase &j) {
+template <typename Context>
+void suspend_resume(Context &ctxt, TestJournalBase &j) {
   const page_t old_root = j.root();
   const auto old_ends = j.end_pointers();
   error_t err;
@@ -41,99 +38,13 @@ void suspend_resume(TestJournalBase &j) {
   j.clear();
   assert(j.root() == TestJournalBase::page_none);
 
-  DHARA_TRY_ABORT(j.resume());
+  DHARA_TRY_ABORT(ctxt.wait_for([&](auto &&op) { j.resume(std::move(op)); }));
 
   assert(old_root == j.root());
   assert(old_ends == j.end_pointers());
 }
 
 StaticSimNand sim_nand;
-
-template <typename Result>
-class SetEventOpImpl : public AsyncOpImpl<Result> {
-  using ret_t = std::optional<Outcome<Result>>;
- public:
-  explicit SetEventOpImpl(ret_t &out) : out(out) {}
-
-  virtual void done(AsyncOpCtxtBase &context, Outcome<Result> &&result) &&noexcept final {
-    out = std::move(result);
-    context.pop(this);
-    context.get_current<SingleShotEventBase>().set();
-  }
-  virtual void done(AsyncOpCtxtBase &context, const Outcome<Result> &result) &&noexcept final {
-    out = result;
-    context.pop(this);
-    context.get_current<SingleShotEventBase>().set();
-  }
-
- private:
-  ret_t &out;
-};
-
-class SingleShotEvent final : public SingleShotEventBase {
- public:
-  virtual void set() noexcept final {
-    std::lock_guard lock(mut);
-    is_set_ = true;
-    cond.notify_all();
-  }
-
-  virtual bool is_set() const noexcept final {
-    std::lock_guard lock(mut);
-    return is_set_;
-  }
-
-  virtual void wait() noexcept final {
-    std::unique_lock lock(mut);
-    while (!is_set_) {
-      cond.wait(lock);
-    }
-  }
-  virtual void destroy(AsyncOpCtxtBase &context) noexcept final { context.pop(this); }
-
- private:
-  mutable std::mutex mut;
-  std::condition_variable cond;
-  bool is_set_ = false;
-};
-
-template <std::size_t stack_size = 1024>
-class HostThreadCtxt final : public AsyncOpCtxtBase {
- public:
-  HostThreadCtxt() : AsyncOpCtxtBase(stack) {}
-
-  template <typename Result = void, typename Call>
-  Outcome<Result> wait_for(Call &&call) {
-    assert_empty();
-    auto *event_ptr = try_get_event();
-    assert(event_ptr);
-    auto &event = *event_ptr;
-    std::optional<Outcome<Result>> ret;
-    auto *event_op_ptr = try_emplace<SetEventOpImpl<Result>>(ret);
-    assert(event_op_ptr);
-    auto &event_op = *event_op_ptr;
-    std::forward<Call>(call)(AsyncOp(*this, event_op));
-    event.wait_and_destroy(*this);
-    assert_empty();
-    assert(ret);
-    return *ret;
-  }
-
-  SingleShotEventBase *try_get_event() noexcept { return try_emplace<SingleShotEvent>(); }
-  virtual void send_to_thread(AsyncCallBase &func) noexcept final {
-    // this will wait for any previously active call to complete
-    cur_call.reset();
-    cur_call = std::async(std::launch::async, [&]() { func.run(); });
-  }
-
-  void assert_empty() const noexcept {
-    assert(&get_current<std::byte>() == stack.data() + stack.size());
-  }
-
- private:
-  std::array<std::byte, stack_size> stack;
-  std::optional<std::future<void>> cur_call;
-};
 
 int main() {
   TestJournal journal(sim_nand);
@@ -143,7 +54,7 @@ int main() {
   sim_nand.inject_bad(20);
 
   printf("Journal init\n");
-  (void) ctxt.wait_for([&](auto &&op) { journal.resume(std::move(op)); });
+  (void)ctxt.wait_for([&](auto &&op) { journal.resume(std::move(op)); });
   journal.dump_info();
   printf("\n");
 
@@ -151,11 +62,13 @@ int main() {
   for (int rep = 0; rep < 20; rep++) {
     int count;
 
-    count = DHARA_TRY_ABORT(ctxt.wait_for<int>([&](auto &&op) { journal.enqueue_sequence(0, 100, std::move(op)); }));
+    count = DHARA_TRY_ABORT(
+        ctxt.wait_for<int>([&](auto &&op) { journal.enqueue_sequence(0, 100, std::move(op)); }));
     assert(count == 100);
 
     printf("    size     = %d -> ", journal.size());
-    journal.dequeue_sequence(0, count);
+    DHARA_TRY_ABORT(
+        ctxt.wait_for<void>([&](auto &&op) { journal.dequeue_sequence(0, count, std::move(op)); }));
     printf("%d\n", journal.size());
   }
   printf("\n");
@@ -170,18 +83,20 @@ int main() {
     int count;
 
     cookie[0] = static_cast<byte>(rep);
-    count = journal.enqueue_sequence(0, 100);
+    count = DHARA_TRY_ABORT(
+        ctxt.wait_for<int>([&](auto &&op) { journal.enqueue_sequence(0, 100, std::move(op)); }));
     assert(count == 100);
 
     while (!journal.is_clean()) {
-      const int c = journal.enqueue_sequence(count++, 1);
-
+      const int c = DHARA_TRY_ABORT(ctxt.wait_for<int>(
+          [&](auto &&op) { journal.enqueue_sequence(count++, 1, std::move(op)); }));
       assert(c == 1);
     }
 
     printf("    size     = %d -> ", journal.size());
-    suspend_resume(journal);
-    journal.dequeue_sequence(0, count);
+    suspend_resume(ctxt, journal);
+    DHARA_TRY_ABORT(
+        ctxt.wait_for<void>([&](auto &&op) { journal.dequeue_sequence(0, count, std::move(op)); }));
     printf("%d\n", journal.size());
 
     assert(cookie[0] == static_cast<byte>(rep));
@@ -192,7 +107,10 @@ int main() {
   journal.dump_info();
   printf("\n");
 
-  sim_nand.dump();
+  printf("Async context stats:\n");
+  ctxt.dump_stats();
+  printf("\n");
 
+  sim_nand.dump();
   return 0;
 }

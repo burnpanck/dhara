@@ -92,8 +92,12 @@ class AsyncOpCtxtBase {
     static_assert(alignof(Ret) <= min_align,
                   "Currently, we do not support types with large alignment");
     const std::size_t sz = storage_size<Ret>();
-    if (cur_frame < stack_top + sz) return nullptr;
+    if (cur_frame - stack_top < sz) {
+      trace_construct_fail(cur_frame, sz, __PRETTY_FUNCTION__);
+      return nullptr;
+    }
     cur_frame -= sz;
+    trace_construct(cur_frame, sz, __PRETTY_FUNCTION__);
     auto ret = new (cur_frame) Ret(std::forward<F>(construct)());
     // ensure that we can reconstruct the reference from the frame pointer;
     assert(ret == reinterpret_cast<Ret *>(cur_frame));
@@ -102,16 +106,24 @@ class AsyncOpCtxtBase {
 
   //! either returns a buffer at least as large as requested, or an empty span
   std::span<std::byte> try_allocate(std::size_t size) noexcept {
-    size = (size + (min_align - 1u)) & (min_align - 1u);
-    if (cur_frame < stack_top + size) return {};
+    size = (size + (min_align - 1u)) & ~(min_align - 1u);
+    if (cur_frame - stack_top < size) {
+      trace_alloc_fail(cur_frame, size);
+      return {};
+    };
     cur_frame -= size;
+    trace_alloc(cur_frame, size);
     return {cur_frame, size};
   }
 
-  void deallocate(std::size_t size) noexcept { cur_frame += size; }
+  void deallocate(std::size_t size) noexcept {
+    trace_dealloc(cur_frame, size);
+    cur_frame += size;
+  }
 
   template <typename T>
   void pop(T *frame) noexcept {
+    trace_destruct(cur_frame, storage_size<T>(), __PRETTY_FUNCTION__);
     assert(cur_frame == reinterpret_cast<std::byte *>(frame));
     frame->~T();
     cur_frame += storage_size<T>();
@@ -119,16 +131,32 @@ class AsyncOpCtxtBase {
 
   template <typename T>
   T &get_current() const noexcept {
+    trace_get(cur_frame, __PRETTY_FUNCTION__);
     return *reinterpret_cast<T *>(cur_frame);
   }
 
   //  virtual SingleShotEventBase *try_get_event() noexcept = 0;
   virtual void send_to_thread(AsyncCallBase &func) noexcept = 0;
 
+ protected:
+  virtual void trace_construct(std::byte *frame, std::size_t sz, const char *type) noexcept {
+    trace_alloc(frame, sz);
+  }
+  virtual void trace_construct_fail(std::byte *frame, std::size_t sz, const char *type) noexcept {
+    trace_alloc_fail(frame, sz);
+  }
+  virtual void trace_alloc(std::byte *frame, std::size_t sz) noexcept {}
+  virtual void trace_alloc_fail(std::byte *frame, std::size_t sz) noexcept {}
+  virtual void trace_destruct(std::byte *frame, std::size_t sz, const char *type) noexcept {
+    trace_dealloc(frame, sz);
+  }
+  virtual void trace_dealloc(std::byte *frame, std::size_t sz) noexcept {}
+  virtual void trace_get(std::byte *frame, const char *type) const noexcept {}
+
  private:
   template <typename T>
   static std::size_t storage_size() {
-    return (sizeof(T) + (min_align - 1u)) & (min_align - 1u);
+    return (sizeof(T) + (min_align - 1u)) & ~(min_align - 1u);
   }
 
   std::byte *const stack_top;
@@ -136,7 +164,7 @@ class AsyncOpCtxtBase {
 };
 
 template <int i>
-static constexpr auto loop_case = std::integral_constant<int,i>{};
+static constexpr auto loop_case = std::integral_constant<int, i>{};
 static constexpr std::monostate dummy_arg = {};
 
 template <typename Impl>
@@ -255,7 +283,7 @@ class AsyncOp {
     auto buf = context.try_allocate(size);
     if (buf.empty()) return std::move(*this).failure(error_t::async_stack_ovfl);
     using alloc_t = AsyncOpWithStateImpl<Result>;
-    auto ret = context.try_emplace<alloc_t>(size);
+    auto ret = context.try_emplace<alloc_t>(buf.size_bytes());
     if (!ret) {
       context.deallocate(buf.size());
       return std::move(*this).failure(error_t::async_stack_ovfl);
@@ -379,7 +407,8 @@ class LoopContinueAsyncOpImpl final : public AsyncOpImpl<InnerResult> {
   template <typename T, std::size_t... I>
   static void call_next(AsyncOpCtxtBase &context, T &&result, std::tuple<Args...> &&args,
                         std::integer_sequence<std::size_t, I...>) {
-    AsyncLoop<OuterImpl>::get_current(context).next(std::get<I>(std::move(args))..., std::forward<T>(result));
+    AsyncLoop<OuterImpl>::get_current(context).next(std::get<I>(std::move(args))...,
+                                                    std::forward<T>(result));
   }
 
   [[no_unique_address]] std::tuple<Args...> args;
@@ -394,14 +423,15 @@ class NestedAsyncCall final : public AsyncCallBase {
       : context(context), body(body) {}
 
   virtual void run() noexcept final {
-    Body lbody = std::move(body);
-    context.pop(this);
     if constexpr (std::is_same_v<OuterResult, void> && std::is_void_v<std::invoke_result_t<Body>>) {
       // void return value for an operation with void result
-      lbody();
+      body();
+      context.pop(this);
       AsyncOp<OuterResult>::get_current(context).success();
     } else {
-      AsyncOp<OuterResult>::get_current(context).done(lbody());
+      auto res = body();
+      context.pop(this);
+      AsyncOp<OuterResult>::get_current(context).done(std::move(res));
     }
   }
 

@@ -383,7 +383,7 @@ Outcome<void> JournalBase::resume() noexcept {
 
 void JournalBase::resume(AsyncOp<void> &&op) noexcept {
   // TODO: implement!
-  std::move(op).run_in_thread([&]() { return resume(); });
+  std::move(op).run_in_thread([this]() { return resume(); });
 }
 
 /**************************************************************************
@@ -1029,10 +1029,38 @@ Outcome<void> JournalBase::enqueue(const std::byte *data, const std::byte *meta)
 }
 void JournalBase::enqueue(const std::byte *data, const std::byte *meta,
                           AsyncOp<void> &&op) noexcept {
-  /*  return std::move(op).loop([this, data, meta](auto &&looper, auto pos, auto &&res =
-     std::monostate{}) mutable { using Res = std::remove_cvref_t<decltype(res)>;
-
-      }, std::monostate{}, std::integral_constant<int,0>{});*/
+  return std::move(op).loop([this,data,meta,i=int(0)](auto &&looper, auto pos, auto &&res) mutable {
+    using Res = std::remove_cvref_t<decltype(res)>;
+    if constexpr (pos == 0) {
+      if (i++ >= config.max_retries) {
+        // loop exit
+        return std::move(looper).finish_failure(error_t::too_bad);
+      }
+      return std::move(looper).continue_after(
+          [&](auto &&op) { return prepare_head(std::move(op)); }, loop_case<1>);
+    } else if constexpr (pos == 1) {
+      static_assert(std::is_same_v<Res, Outcome<void>>);
+      if(res.has_error()) return std::move(looper).next(loop_case<2>,res);
+      if(data){
+        return std::move(looper).continue_after(
+            [&](auto &&op) { return nand.prog(head,data,std::move(op)); }, loop_case<2>);
+      }
+      return std::move(looper).next(loop_case<2>,Outcome<void>(error_t::none));
+    } else if constexpr (pos == 2) {
+      static_assert(std::is_same_v<Res, Outcome<void>>);
+      if(res.has_value()) return std::move(looper).continue_after(
+            [&](auto &&op) { return push_meta(meta,std::move(op)); }, loop_case<4>);
+      return std::move(looper).continue_after(
+          [&](auto &&op) { return recover_from(res.error(),std::move(op)); }, loop_case<3>);
+    } else if constexpr (pos == 3) {
+      static_assert(std::is_same_v<Res, Outcome<void>>);
+      if(res.has_error()) return std::move(looper).finish_failure(res.error());
+      return std::move(looper).next(loop_case<0>, dummy_arg);
+    } else {
+      static_assert(pos == 4);
+      return std::move(looper).finish_with(res);
+    }
+    }, loop_case<0>, dummy_arg);
 }
 
 Outcome<void> JournalBase::copy(page_t p, const std::byte *meta) noexcept {

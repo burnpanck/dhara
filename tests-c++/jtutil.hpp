@@ -19,6 +19,13 @@
 
 #include <dhara/journal.hpp>
 
+#include <cassert>
+#include <condition_variable>
+#include <cstdint>
+#include <future>
+#include <optional>
+#include <thread>
+
 namespace dhara_tests {
 
 using namespace dhara;
@@ -42,6 +49,7 @@ class TestJournalBase : public JournalBase {
    * order.
    */
   void dequeue_sequence(int start, int count);
+  void dequeue_sequence(int start, int count, AsyncOp<void> &&op);
 
   [[nodiscard]] std::pair<page_t, page_t> end_pointers() const { return {tail, head}; }
 
@@ -74,6 +82,120 @@ class TestJournal
 template <std::uint8_t log2_page_size_, std::uint8_t log2_ppb_, typename NBase>
 TestJournal(Nand<log2_page_size_, log2_ppb_, NBase> &nand)
     -> TestJournal<log2_page_size_, log2_ppb_>;
+
+template <typename Result>
+class SetEventOpImpl : public AsyncOpImpl<Result> {
+  using ret_t = std::optional<Outcome<Result>>;
+
+ public:
+  explicit SetEventOpImpl(ret_t &out, SingleShotEventBase &event) : out(out), event(event) {}
+
+  virtual void done(AsyncOpCtxtBase &context, Outcome<Result> &&result) &&noexcept final {
+    out = std::move(result);
+    auto &levent = event;
+    context.pop(this);
+    levent.set();
+  }
+  virtual void done(AsyncOpCtxtBase &context, const Outcome<Result> &result) &&noexcept final {
+    out = result;
+    auto &levent = event;
+    context.pop(this);
+    levent.set();
+  }
+
+ private:
+  ret_t &out;
+  SingleShotEventBase &event;
+};
+
+class SingleShotEvent final : public SingleShotEventBase {
+ public:
+  virtual void set() noexcept final {
+    std::lock_guard lock(mut);
+    is_set_ = true;
+    cond.notify_all();
+  }
+
+  virtual bool is_set() const noexcept final {
+    std::lock_guard lock(mut);
+    return is_set_;
+  }
+
+  virtual void wait() noexcept final {
+    std::unique_lock lock(mut);
+    while (!is_set_) {
+      cond.wait(lock);
+    }
+  }
+  virtual void destroy(AsyncOpCtxtBase &context) noexcept final { context.pop(this); }
+
+ private:
+  mutable std::mutex mut;
+  std::condition_variable cond;
+  bool is_set_ = false;
+};
+
+class HostThreadCtxtBase : public AsyncOpCtxtBase {
+ public:
+  explicit HostThreadCtxtBase(const std::span<std::byte> &stack) : AsyncOpCtxtBase(stack) {}
+
+  template <typename Result = void, typename Call>
+  Outcome<Result> wait_for(Call &&call) {
+    SingleShotEvent event;
+    std::optional<Outcome<Result>> ret;
+    auto *event_op_ptr = try_emplace<SetEventOpImpl<Result>>(ret, event);
+    assert(event_op_ptr);
+    auto &event_op = *event_op_ptr;
+    std::forward<Call>(call)(AsyncOp(*this, event_op));
+    event.wait();
+    assert(ret);
+    return *ret;
+  }
+
+  virtual void send_to_thread(AsyncCallBase &func) noexcept final;
+
+  void dump_stats() const noexcept;
+
+ protected:
+  virtual void trace_construct(std::byte *frame, std::size_t sz, const char *type) noexcept final;
+  virtual void trace_construct_fail(std::byte *frame, std::size_t sz,
+                                    const char *type) noexcept final;
+  virtual void trace_alloc(std::byte *frame, std::size_t sz) noexcept final;
+  virtual void trace_alloc_fail(std::byte *frame, std::size_t sz) noexcept final;
+  virtual void trace_destruct(std::byte *frame, std::size_t sz, const char *type) noexcept final;
+  virtual void trace_dealloc(std::byte *frame, std::size_t sz) noexcept final;
+  virtual void trace_get(std::byte *frame, const char *type) const noexcept final;
+
+ private:
+  [[nodiscard]] virtual std::size_t get_pos(std::byte *frame) const noexcept = 0;
+
+  std::optional<std::future<void>> cur_call;
+  std::mutex mut;
+  bool active = false;
+  AsyncCallBase *next_call = nullptr;
+
+  bool do_print_trace = false;
+  std::size_t depth = 0;
+
+  // stats
+  std::size_t max_depth = 0;
+  std::size_t max_use = 0;
+  std::size_t num_construct = 0;
+  std::size_t num_alloc = 0;
+};
+
+template <std::size_t stack_size = 2048>
+class HostThreadCtxt final : public HostThreadCtxtBase {
+ public:
+  HostThreadCtxt() : HostThreadCtxtBase(stack) {}
+
+ private:
+  [[nodiscard]] virtual std::size_t get_pos(std::byte *frame) const noexcept final {
+    return stack.end() - frame;
+  }
+
+  std::array<std::byte, stack_size> stack;
+};
 
 }  // namespace dhara_tests
 
