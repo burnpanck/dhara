@@ -222,6 +222,48 @@ block_t JournalBase::find_last_checkblock(block_t first) noexcept {
   return first;
 }
 
+void JournalBase::find_last_checkblock(block_t first, AsyncOp<block_t> &&op) noexcept {
+  return std::move(op).loop(
+      [this, first, low = first, high = static_cast<block_t>(nand.num_blocks() - 1),
+       tmp = block_t{}](auto &&looper, auto pos, auto &&res) mutable {
+        using Res = std::remove_cvref_t<decltype(res)>;
+        if constexpr (pos == 0) {
+          if (low > high) {
+            // loop exit
+            return std::move(looper).finish_success(first);
+          }
+          const block_t mid = (low + high) >> 1u;
+          tmp = mid;
+          return std::move(looper).template continue_after<block_t>(
+              [&](auto &&op) { return find_checkblock(mid, std::move(op)); }, loop_case<1>);
+        } else if constexpr (pos == 1) {
+          if (res.has_error() || (hdr_get_epoch(hdr_cbuf_t(page_buf())) != epoch)) {
+            const block_t mid = tmp;
+            if (!mid) return std::move(looper).finish_success(first);
+            high = mid - 1;
+            return std::move(looper).next(loop_case<0>, dummy_arg);
+          } else {
+            const block_t found = res.value();
+
+            if ((found + 1) >= nand.num_blocks()) return std::move(looper).finish_success(found);
+            tmp = found;
+            return std::move(looper).template continue_after<block_t>(
+                [&](auto &&op) { return find_checkblock(found + 1, std::move(op)); }, loop_case<2>);
+          }
+        } else {
+          static_assert(pos == 2);
+          const block_t found = tmp;
+          if (res.has_error() || (hdr_get_epoch(hdr_cbuf_t(page_buf())) != epoch)) {
+            return std::move(looper).finish_success(found);
+          }
+
+          low = res.value();
+          return std::move(looper).next(loop_case<0>, dummy_arg);
+        }
+      },
+      loop_case<0>, dummy_arg);
+}
+
 /* Test whether a checkpoint group is in a state fit for reprogramming,
  * but allow for the fact that is_free() might not have any way of
  * distinguishing between an unprogrammed page, and a page programmed
@@ -246,6 +288,31 @@ bool JournalBase::cp_free(page_t first_user) const noexcept {
     if (!nand.is_free(first_user + i)) return false;
 
   return true;
+}
+
+void JournalBase::cp_free(page_t first_user, AsyncOp<bool> &&op) const noexcept {
+  return std::move(op).loop(
+      [this, first_user, i = int(-1)](auto &&looper, auto &&res) mutable {
+        // -- second half of loop
+        if (!res.has_value()) {
+          // should never happen!
+          return std::move(looper).finish_failure(res.error());
+        }
+        const bool is_free = res.value();
+        if (!is_free) {
+          return std::move(looper).finish_success(false);
+        }
+        // -- loop roll-over
+        i++;
+        if (i >= (1u << config.log2_ppc)) {
+          // loop exit
+          return std::move(looper).finish_success(true);
+        }
+        // -- first half of loop
+        return std::move(looper).template continue_after<bool>(
+            [&](auto &&op) { return nand.is_free(first_user + 1, std::move(op)); });
+      },
+      Outcome<bool>(true));
 }
 
 page_t JournalBase::find_last_group(block_t blk) const noexcept {
@@ -275,6 +342,55 @@ page_t JournalBase::find_last_group(block_t blk) const noexcept {
   return blk << config.nand.log2_ppb;
 }
 
+void JournalBase::find_last_group(block_t blk, AsyncOp<page_t> &&op) const noexcept {
+  const int num_groups = 1u << (config.nand.log2_ppb - config.log2_ppc);
+  return std::move(op).loop(
+      [this, blk, low = int(0), high = int(num_groups - 1)](auto &&looper, auto pos,
+                                                            auto &&res) mutable {
+        const int num_groups = 1u << (config.nand.log2_ppb - config.log2_ppc);
+        const int mid = (low + high) >> 1u;
+        const page_t p = (mid << config.log2_ppc) | (blk << config.nand.log2_ppb);
+
+        if constexpr (pos == 0) {
+          if (low > high) {
+            // loop exit
+            return std::move(looper).finish_success(blk << config.nand.log2_ppb);
+          }
+          return std::move(looper).template continue_after<bool>(
+              [&](auto &&op) { return cp_free(p, std::move(op)); }, loop_case<1>);
+        } else if constexpr (pos == 1) {
+          if (!res.has_value()) {
+            // should never happen!
+            return std::move(looper).finish_failure(res.error());
+          }
+          const bool is_free = res.value();
+          if (is_free) {
+            high = mid - 1;
+            return std::move(looper).next(loop_case<0>, dummy_arg);
+          }
+          if ((mid + 1) >= num_groups) {
+            return std::move(looper).finish_success(p);
+          }
+          return std::move(looper).template continue_after<bool>(
+              [&](auto &&op) { return cp_free(p + (1u << config.log2_ppc), std::move(op)); },
+              loop_case<2>);
+        } else {
+          static_assert(pos == 2);
+          if (!res.has_value()) {
+            // should never happen!
+            return std::move(looper).finish_failure(res.error());
+          }
+          const bool is_free = res.value();
+          if (is_free) {
+            return std::move(looper).finish_success(p);
+          }
+          low = mid + 1;
+          return std::move(looper).next(loop_case<0>, dummy_arg);
+        }
+      },
+      loop_case<0>, dummy_arg);
+}
+
 Outcome<void> JournalBase::find_root(page_t start) noexcept {
   const std::uint8_t log2_ppb = config.nand.log2_ppb;
   const block_t blk = start >> log2_ppb;
@@ -294,6 +410,41 @@ Outcome<void> JournalBase::find_root(page_t start) noexcept {
   }
 
   return error_t::too_bad;
+}
+
+void JournalBase::find_root(page_t start, AsyncOp<void> &&op) noexcept {
+  const std::uint8_t log2_ppb = config.nand.log2_ppb;
+  const block_t blk = start >> log2_ppb;
+  int i = (start & ((1u << log2_ppb) - 1u)) >> config.log2_ppc;
+
+  return std::move(op).loop(
+      [this, start, i](auto &&looper, auto pos, auto &&res) mutable {
+        const std::uint8_t log2_ppb = config.nand.log2_ppb;
+        const block_t blk = start >> log2_ppb;
+        const page_t p = (blk << log2_ppb) + ((i + 1u) << config.log2_ppc) - 1u;
+
+        if constexpr (pos == 0) {
+          if (i < 0) {
+            // loop exit
+            return std::move(looper).finish_failure(error_t::too_bad);
+          }
+
+          return std::move(looper).continue_after(
+              [&](auto &&op) { return nand.read(p, 0, page_buf(), std::move(op)); }, loop_case<1>);
+        } else {
+          static_assert(pos == 1);
+          auto page_buf = this->page_buf();
+          if (res.has_value() && (hdr_has_magic(hdr_cbuf_t(page_buf))) &&
+              (hdr_get_epoch(hdr_cbuf_t(page_buf)) == epoch)) {
+            root_ = p - 1;
+            return std::move(looper).finish_success();
+          }
+
+          i--;
+          return std::move(looper).next(loop_case<0>, dummy_arg);
+        }
+      },
+      loop_case<0>, dummy_arg);
 }
 
 Outcome<void> JournalBase::find_head(page_t start) noexcept {
@@ -317,12 +468,58 @@ Outcome<void> JournalBase::find_head(page_t start) noexcept {
     /* If we hit the end of the block, we're done */
     if (is_aligned(head, log2_ppb)) {
       /* Make sure we don't chase over the tail */
-      if (align_eq(head, tail, log2_ppb)) tail = next_block(nand, tail >> log2_ppb) << log2_ppb;
+      if (align_eq(head, tail, log2_ppb)) {
+        tail = next_block(nand, tail >> log2_ppb) << log2_ppb;
+      }
       break;
     }
   } while (!cp_free(head));
 
   return error_t::none;
+}
+
+void JournalBase::find_head(page_t start, AsyncOp<void> &&op) noexcept {
+  head = start;
+  /* Starting from the last good checkpoint, find either:
+   *
+   *   (a) the next free user-page in the same block
+   *   (b) or, the first page of the next block
+   *
+   * The block we end up on might be bad, but that's ok -- we'll
+   * skip it when we go to prepare the next write.
+   */
+  return std::move(op).loop(
+      [this](auto &&looper, auto &&res) {
+        const std::uint8_t log2_ppb = config.nand.log2_ppb;
+
+        if (!res.has_value()) {
+          // should never happen!
+          return std::move(looper).finish_failure(res.error());
+        }
+        if (res.value()) {
+          // loop exit
+          return std::move(looper).finish_success();
+        }
+
+        /* Skip to the next userpage */
+        head = next_upage(head);
+        if (!head) roll_stats();
+
+        /* If we hit the end of the block, we're done */
+        if (is_aligned(head, log2_ppb)) {
+          /* Make sure we don't chase over the tail */
+          if (align_eq(head, tail, log2_ppb)) {
+            tail = next_block(nand, tail >> log2_ppb) << log2_ppb;
+          }
+          // break;
+          return std::move(looper).finish_success();
+        }
+
+        return std::move(looper).template continue_after<bool>([&](auto &&op){
+          return cp_free(head, std::move(op));
+        });
+      },
+      Outcome<bool>(false));
 }
 
 Outcome<void> JournalBase::resume() noexcept {
@@ -363,7 +560,7 @@ Outcome<void> JournalBase::resume() noexcept {
   tail = hdr_get_tail(hdr_cbuf_t(page_buf));
   bb_current = hdr_get_bb_current(hdr_cbuf_t(page_buf));
   bb_last = hdr_get_bb_last(hdr_cbuf_t(page_buf));
-  hdr_clear_user(page_buf, nand.log2_page_size());
+  hdr_clear_user(page_buf, config.nand.log2_page_size);
 
   /* Perform another linear scan to find the next free user page */
   {
@@ -382,8 +579,74 @@ Outcome<void> JournalBase::resume() noexcept {
 }
 
 void JournalBase::resume(AsyncOp<void> &&op) noexcept {
-  // TODO: implement!
-  std::move(op).run_in_thread([this]() { return resume(); });
+  return std::move(op).loop(
+      [this, last_group = page_t{}](auto &&looper, auto pos, auto &&res) mutable {
+        using Res = std::remove_cvref_t<decltype(res)>;
+        if constexpr (pos == 0) {
+          /* Find the first checkpoint-containing block */
+          return std::move(looper).template continue_after<block_t>(
+              [&](auto &&op) { return find_checkblock(0, std::move(op)); }, loop_case<1>);
+        } else if constexpr (pos == 1) {
+          if (res.has_error()) {
+            reset_journal();
+            return std::move(looper).finish_failure(res.error());
+          }
+          block_t first = res.value();
+          /* Find the last checkpoint-containing block in this epoch */
+          epoch = hdr_get_epoch(hdr_cbuf_t(page_buf()));
+          return std::move(looper).template continue_after<block_t>(
+              [&](auto &&op) { return find_last_checkblock(first, std::move(op)); }, loop_case<2>);
+        } else if constexpr (pos == 2) {
+          if (res.has_error()) {
+            // SHOULD NEVER HAPPEN!
+            reset_journal();
+            return std::move(looper).finish_failure(res.error());
+          }
+          block_t last = res.value();
+          /* Find the last programmed checkpoint group in the block */
+          return std::move(looper).template continue_after<page_t>(
+              [&](auto &&op) { return find_last_group(last, std::move(op)); }, loop_case<3>);
+        } else if constexpr (pos == 3) {
+          if (res.has_error()) {
+            // SHOULD NEVER HAPPEN!
+            reset_journal();
+            return std::move(looper).finish_failure(res.error());
+          }
+          last_group = res.value();
+          /* Perform a linear scan to find the last good checkpoint (and
+           * therefore the root).
+           */
+          return std::move(looper).continue_after(
+              [&](auto &&op) { return find_root(last_group, std::move(op)); }, loop_case<4>);
+        } else if constexpr (pos == 4) {
+          if (res.has_error()) {
+            reset_journal();
+            return std::move(looper).finish_failure(res.error());
+          }
+          /* Restore settings from checkpoint */
+          auto page_buf = this->page_buf();
+          tail = hdr_get_tail(hdr_cbuf_t(page_buf));
+          bb_current = hdr_get_bb_current(hdr_cbuf_t(page_buf));
+          bb_last = hdr_get_bb_last(hdr_cbuf_t(page_buf));
+          hdr_clear_user(page_buf, config.nand.log2_page_size);
+
+          /* Perform another linear scan to find the next free user page */
+          return std::move(looper).continue_after(
+              [&](auto &&op) { return find_head(last_group, std::move(op)); }, loop_case<5>);
+        } else {
+          static_assert(pos == 5);
+          if (res.has_error()) {
+            reset_journal();
+            return std::move(looper).finish_failure(res.error());
+          }
+          flags = 0;
+          tail_sync = tail;
+
+          clear_recovery();
+          return std::move(looper).finish_success();
+        }
+      },
+      loop_case<0>, dummy_arg);
 }
 
 /**************************************************************************
@@ -1029,38 +1292,41 @@ Outcome<void> JournalBase::enqueue(const std::byte *data, const std::byte *meta)
 }
 void JournalBase::enqueue(const std::byte *data, const std::byte *meta,
                           AsyncOp<void> &&op) noexcept {
-  return std::move(op).loop([this,data,meta,i=int(0)](auto &&looper, auto pos, auto &&res) mutable {
-    using Res = std::remove_cvref_t<decltype(res)>;
-    if constexpr (pos == 0) {
-      if (i++ >= config.max_retries) {
-        // loop exit
-        return std::move(looper).finish_failure(error_t::too_bad);
-      }
-      return std::move(looper).continue_after(
-          [&](auto &&op) { return prepare_head(std::move(op)); }, loop_case<1>);
-    } else if constexpr (pos == 1) {
-      static_assert(std::is_same_v<Res, Outcome<void>>);
-      if(res.has_error()) return std::move(looper).next(loop_case<2>,res);
-      if(data){
-        return std::move(looper).continue_after(
-            [&](auto &&op) { return nand.prog(head,data,std::move(op)); }, loop_case<2>);
-      }
-      return std::move(looper).next(loop_case<2>,Outcome<void>(error_t::none));
-    } else if constexpr (pos == 2) {
-      static_assert(std::is_same_v<Res, Outcome<void>>);
-      if(res.has_value()) return std::move(looper).continue_after(
-            [&](auto &&op) { return push_meta(meta,std::move(op)); }, loop_case<4>);
-      return std::move(looper).continue_after(
-          [&](auto &&op) { return recover_from(res.error(),std::move(op)); }, loop_case<3>);
-    } else if constexpr (pos == 3) {
-      static_assert(std::is_same_v<Res, Outcome<void>>);
-      if(res.has_error()) return std::move(looper).finish_failure(res.error());
-      return std::move(looper).next(loop_case<0>, dummy_arg);
-    } else {
-      static_assert(pos == 4);
-      return std::move(looper).finish_with(res);
-    }
-    }, loop_case<0>, dummy_arg);
+  return std::move(op).loop(
+      [this, data, meta, i = int(0)](auto &&looper, auto pos, auto &&res) mutable {
+        using Res = std::remove_cvref_t<decltype(res)>;
+        if constexpr (pos == 0) {
+          if (i++ >= config.max_retries) {
+            // loop exit
+            return std::move(looper).finish_failure(error_t::too_bad);
+          }
+          return std::move(looper).continue_after(
+              [&](auto &&op) { return prepare_head(std::move(op)); }, loop_case<1>);
+        } else if constexpr (pos == 1) {
+          static_assert(std::is_same_v<Res, Outcome<void>>);
+          if (res.has_error()) return std::move(looper).next(loop_case<2>, res);
+          if (data) {
+            return std::move(looper).continue_after(
+                [&](auto &&op) { return nand.prog(head, data, std::move(op)); }, loop_case<2>);
+          }
+          return std::move(looper).next(loop_case<2>, Outcome<void>(error_t::none));
+        } else if constexpr (pos == 2) {
+          static_assert(std::is_same_v<Res, Outcome<void>>);
+          if (res.has_value())
+            return std::move(looper).continue_after(
+                [&](auto &&op) { return push_meta(meta, std::move(op)); }, loop_case<4>);
+          return std::move(looper).continue_after(
+              [&](auto &&op) { return recover_from(res.error(), std::move(op)); }, loop_case<3>);
+        } else if constexpr (pos == 3) {
+          static_assert(std::is_same_v<Res, Outcome<void>>);
+          if (res.has_error()) return std::move(looper).finish_failure(res.error());
+          return std::move(looper).next(loop_case<0>, dummy_arg);
+        } else {
+          static_assert(pos == 4);
+          return std::move(looper).finish_with(res);
+        }
+      },
+      loop_case<0>, dummy_arg);
 }
 
 Outcome<void> JournalBase::copy(page_t p, const std::byte *meta) noexcept {
